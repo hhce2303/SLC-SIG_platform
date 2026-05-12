@@ -1,0 +1,582 @@
+﻿{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block title %}Database Dashboard{% endblock %}
+
+{% block content %}
+<style>
+    /* â”€â”€ layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .dashboard-header {
+        margin-bottom: 8px;
+        color: #f8f8f8;
+    }
+
+    /* â”€â”€ SIG Tools parent card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .sigtools-card {
+        border: 2px solid #417690;
+        border-radius: 10px;
+        padding: 24px 28px 28px;
+        background: #000000;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.10);
+        margin: 20px 0 32px;
+    }
+    .sigtools-header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 18px;
+    }
+    .sigtools-header h2 {
+        margin: 0;
+        font-size: 1.55em;
+        color: #205067;
+    }
+    .sigtools-meta {
+        color: #faf9f9;
+        font-size: 0.88em;
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+        margin-bottom: 6px;
+    }
+    .sigtools-meta code {
+        background: #000000;
+        padding: 2px 7px;
+        border-radius: 3px;
+        font-size: 0.95em;
+    }
+    .sigtools-actions {
+        margin-top: 10px;
+        margin-bottom: 20px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .sigtools-btn {
+        display: inline-block;
+        padding: 8px 20px;
+        background: #417690;
+        color: #fff;
+        text-decoration: none;
+        border-radius: 4px;
+        font-weight: 600;
+        font-size: 0.88em;
+        transition: background 0.2s;
+    }
+    .sigtools-btn:hover { background: #205067; color: #fff; }
+    .sigtools-btn.secondary {
+        background: #fff;
+        color: #417690;
+        border: 1px solid #417690;
+    }
+    .sigtools-btn.secondary:hover { background: #e3ecf3; }
+    .sigtools-btn.placeholder {
+        background: #e0e0e0;
+        color: #888;
+        cursor: not-allowed;
+        pointer-events: none;
+    }
+
+    /* â”€â”€ separator / label â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .child-label {
+        font-size: 0.78em;
+        font-weight: 700;
+        color: #8a9bb0;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 12px;
+        border-bottom: 1px dashed #c5d4e0;
+        padding-bottom: 6px;
+    }
+
+    /* â”€â”€ child DB cards grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .child-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 16px;
+    }
+    .db-card {
+        border: 1px solid #c9d8e8;
+        border-radius: 8px;
+        padding: 18px 20px;
+        background: #000000;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+        transition: box-shadow 0.2s, border-color 0.2s;
+    }
+    .db-card:hover {
+        box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+        border-color: #417690;
+    }
+    .db-card h3 {
+        margin: 0 0 10px 0;
+        font-size: 1.1em;
+        color: #ffffff;
+    }
+    .db-meta {
+        color: #ffffff;
+        font-size: 0.82em;
+        margin-bottom: 12px;
+        line-height: 1.7;
+    }
+    .db-meta code {
+        background: #000000;
+        padding: 1px 5px;
+        border-radius: 3px;
+    }
+    .status-badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 0.78em;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .status-online  { background: #d4edda; color: #155724; }
+    .status-offline { background: #f8d7da; color: #721c24; }
+    .db-error {
+        margin-top: 8px;
+        padding: 6px 10px;
+        background: #fff3cd;
+        border-radius: 4px;
+        font-size: 0.8em;
+        color: #856404;
+        word-break: break-all;
+    }
+    .db-btn {
+        display: inline-block;
+        margin-top: 14px;
+        padding: 8px 18px;
+        background: #417690;
+        color: #fff;
+        text-decoration: none;
+        border-radius: 4px;
+        font-weight: 600;
+        font-size: 0.85em;
+        transition: background 0.2s;
+    }
+    .db-btn:hover { background: #205067; color: #fff; }
+    .db-btn.disabled { background: #ccc; cursor: not-allowed; pointer-events: none; }
+
+    /* â”€â”€ general section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+    .general-section { margin-top: 28px; }
+    .general-section h3 {
+        font-size: 0.9rem;
+        color: #555;
+        margin-bottom: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        border-bottom: 1px solid #e0e0e0;
+        padding-bottom: 6px;
+    }
+    .general-cards {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+    }
+    .general-card {
+        background: #000000;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 14px 20px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        text-decoration: none;
+        color: #333;
+        font-weight: 600;
+        font-size: 0.88rem;
+        transition: box-shadow 0.15s, border-color 0.15s;
+    }
+    .general-card:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        border-color: #417690;
+        color: #417690;
+        text-decoration: none;
+    }
+    .general-card .icon { font-size: 1.2rem; }
+
+    /* ── chatbot widget ─────────────────────────────────────────────── */
+    .chatbot-widget {
+        position: fixed;
+        bottom: 32px;
+        right: 32px;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 12px;
+    }
+    .chatbot-panel {
+        display: none;
+        flex-direction: column;
+        width: 360px;
+        height: 500px;
+        background: #1a1a2e;
+        border: 1.5px solid #417690;
+        border-radius: 16px;
+        overflow: hidden;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+    }
+    .chatbot-panel.open { display: flex; }
+    .chatbot-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 18px;
+        background: #417690;
+    }
+    .chatbot-panel-header span {
+        font-weight: 700;
+        color: #fff;
+        font-size: 0.95em;
+        letter-spacing: 0.03em;
+    }
+    .chatbot-close-btn {
+        background: none;
+        border: none;
+        color: #fff;
+        font-size: 1.2rem;
+        cursor: pointer;
+        line-height: 1;
+        padding: 0;
+        opacity: 0.85;
+        transition: opacity 0.2s;
+    }
+    .chatbot-close-btn:hover { opacity: 1; }
+    .chatbot-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px;
+        /* messages will be injected here */
+    }
+    .chatbot-footer {
+        padding: 12px 14px;
+        border-top: 1px solid #2e3a4a;
+        display: flex;
+        gap: 8px;
+        background: #111827;
+    }
+    .chatbot-input {
+        flex: 1;
+        background: #1f2937;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        color: #f9fafb;
+        padding: 8px 12px;
+        font-size: 0.88em;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+    .chatbot-input:focus { border-color: #417690; }
+    .chatbot-send-btn {
+        background: #417690;
+        border: none;
+        border-radius: 8px;
+        color: #fff;
+        padding: 8px 14px;
+        cursor: pointer;
+        font-size: 1rem;
+        transition: background 0.2s;
+    }
+    .chatbot-send-btn:hover { background: #205067; }
+    .chatbot-toggle-btn {
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        background: #417690;
+        border: none;
+        color: #fff;
+        font-size: 1.55rem;
+        cursor: pointer;
+        box-shadow: 0 4px 16px rgba(65,118,144,0.5);
+        transition: background 0.2s, transform 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .chatbot-toggle-btn:hover {
+        background: #205067;
+        transform: scale(1.07);
+    }
+
+    /* ── scale ─────────────────────────────────────────────────────── */
+    .dashboard-scale { zoom: 1.5; }
+</style>
+
+<div class="dashboard-scale">
+<p class="dashboard-header">Selecciona la base de datos que deseas administrar:</p>
+
+<!-- â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•  SIG TOOLS PARENT CARD  â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
+<div class="sigtools-card">
+    <div class="sigtools-header">
+        <span style="font-size:2rem;">&#128295;</span>
+        <div>
+            <h2>{{ sigtools.label }}</h2>
+            <span class="status-badge status-{{ sigtools.status }}">{{ sigtools.status }}</span>
+        </div>
+    </div>
+
+    <div class="sigtools-meta">
+        <span><strong>Alias:</strong> <code>{{ sigtools.alias }}</code></span>
+        <span><strong>Host:</strong> <code>{{ sigtools.host }}</code></span>
+        <span><strong>Schema:</strong> <code>{{ sigtools.name }}</code></span>
+    </div>
+
+    {% if sigtools.error %}
+    <div class="db-error">{{ sigtools.error }}</div>
+    {% endif %}
+
+    <!-- Quick actions / placeholders -->
+    <div class="sigtools-actions">
+        {% if sigtools.status == "online" %}
+        <a href="{{ sigtools.admin_url }}" class="sigtools-btn">Administrar SIG Tools &rarr;</a>
+        {% else %}
+        <span class="sigtools-btn placeholder">No disponible</span>
+        {% endif %}
+        <span class="sigtools-btn placeholder" title="Próximamente">&#128202; Metricas Globales</span>
+        <span class="sigtools-btn placeholder" title="Próximamente">&#128101; Gestión de usuarios</span>
+        <span class="sigtools-btn placeholder" title="Próximamente">&#128274; Permisos y accesos</span>
+    </div>
+
+    <!-- â”€â”€ Child databases â”€â”€ -->
+    <div class="child-label">Bases de datos conectadas</div>
+    <div class="child-grid">
+        {% for db in sigtools.children %}
+        <div class="db-card">
+            <h3>{{ db.label }}</h3>
+            <div class="db-meta">
+                <div><strong>Alias:</strong> <code>{{ db.alias }}</code></div>
+                <div><strong>Host:</strong> <code>{{ db.host }}</code></div>
+                <div><strong>Schema:</strong> <code>{{ db.name }}</code></div>
+            </div>
+            <span class="status-badge status-{{ db.status }}">{{ db.status }}</span>
+            {% if db.error %}
+            <div class="db-error">{{ db.error }}</div>
+            {% endif %}
+            <div>
+                {% if db.status == "online" %}
+                <a href="{{ db.admin_url }}" class="db-btn">Administrar &rarr;</a>
+                {% else %}
+                <span class="db-btn disabled">No disponible</span>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•  PLATAFORMA CENTRAL  â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
+<div class="general-section">
+    <h3>Plataforma Central</h3>
+    <div class="general-cards">
+        <a href="/admin/auth/user/" class="general-card">
+            <span class="icon">&#128100;</span> Usuarios
+        </a>
+        <a href="/admin/auth/group/" class="general-card">
+            <span class="icon">&#128101;</span> Grupos
+        </a>
+        <a href="/admin/users/session/" class="general-card">
+            <span class="icon">&#128274;</span> Sesiones
+        </a>
+        <a href="/admin/platform/tool/" class="general-card">
+            <span class="icon">&#128279;</span> Herramientas
+        </a>
+        <a href="/admin/platform/usertoolaccess/" class="general-card">
+            <span class="icon">&#128196;</span> Accesos por usuario
+        </a>
+    </div>
+</div>
+</div>{# /dashboard-scale #}
+
+<!-- ══════════════  CHATBOT WIDGET  ══════════════ -->
+<div class="chatbot-widget" id="chatbot-widget">
+
+    <!-- Panel (hidden by default) -->
+    <div class="chatbot-panel" id="chatbot-panel">
+        <div class="chatbot-panel-header">
+            <span>&#129302; Hectorcito 3000</span>
+            <button class="chatbot-close-btn" id="chatbot-close" title="Cerrar">&#10005;</button>
+        </div>
+
+        <!-- Messages area — inject chatbot messages here -->
+        <div class="chatbot-body" id="chatbot-body">
+            <!-- chatbot content goes here -->
+        </div>
+
+        <div class="chatbot-footer">
+            <input
+                class="chatbot-input"
+                id="chatbot-input"
+                type="text"
+                placeholder="Escribe tu mensaje..."
+                autocomplete="off"
+            />
+            <button class="chatbot-send-btn" id="chatbot-send" title="Enviar">&#10148;</button>
+        </div>
+    </div>
+
+    <!-- Toggle button -->
+    <button class="chatbot-toggle-btn" id="chatbot-toggle" title="Abrir asistente">
+        &#129302;
+    </button>
+</div>
+
+<script>
+(function () {
+    /* ── DOM refs ─────────────────────────────────────────────── */
+    const toggle    = document.getElementById('chatbot-toggle');
+    const closeBtn  = document.getElementById('chatbot-close');
+    const panel     = document.getElementById('chatbot-panel');
+    const body      = document.getElementById('chatbot-body');
+    const input     = document.getElementById('chatbot-input');
+    const sendBtn   = document.getElementById('chatbot-send');
+
+    /* ── State ────────────────────────────────────────────────── */
+    const history   = [];   // [{role, content}, ...]
+    let   ready     = false; // true after ping succeeds
+    let   busy      = false; // true while request is in-flight
+
+    /* ── CSRF token (required by SessionAuthentication) ────────── */
+    function getCsrf() {
+        const m = document.cookie.match(/csrftoken=([^;]+)/);
+        return m ? m[1] : '';
+    }
+
+    /* ── Render helpers ───────────────────────────────────────── */
+    function appendMsg(role, text) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = [
+            'margin: 6px 0',
+            'padding: 7px 11px',
+            'border-radius: 8px',
+            'max-width: 92%',
+            'white-space: pre-wrap',
+            'word-break: break-word',
+            'font-size: 0.85em',
+            'line-height: 1.5',
+            role === 'user'
+                ? 'align-self:flex-end;background:#417690;color:#fff;margin-left:auto'
+                : 'align-self:flex-start;background:#2a2a2a;color:#e8e8e8',
+        ].join(';');
+        wrap.textContent = text;
+        body.appendChild(wrap);
+        body.scrollTop = body.scrollHeight;
+        return wrap;
+    }
+
+    function appendStatus(html, color) {
+        const el = document.createElement('div');
+        el.style.cssText = 'text-align:center;font-size:0.78em;color:' + color + ';margin:8px 0;';
+        el.innerHTML = html;
+        body.appendChild(el);
+        body.scrollTop = body.scrollHeight;
+    }
+
+    function setLoading(on) {
+        busy      = on;
+        input.disabled  = on;
+        sendBtn.disabled = on;
+        sendBtn.style.opacity = on ? '0.4' : '1';
+    }
+
+    /* ── Ping — verifies key + connectivity, no message tokens ── */
+    function ping() {
+        appendStatus('Verificando conexión con la IA…', '#888');
+        fetch('/api/v1/chatbot/ping/', {
+            method:  'GET',
+            headers: { 'X-CSRFToken': getCsrf() },
+            credentials: 'same-origin',
+        })
+        .then(function (res) {
+            if (!res.ok) {
+                return res.json().then(function (d) {
+                    throw new Error(d.detail || d.error || 'HTTP ' + res.status);
+                });
+            }
+            return res.json();
+        })
+        .then(function (data) {
+            ready = true;
+            appendStatus('&#9679; Asistente listo', '#5cb85c');
+            setLoading(false);
+        })
+        .catch(function (err) {
+            ready = false;
+            appendStatus('&#9679; Sin conexión: ' + err.message, '#d9534f');
+            setLoading(false);
+        });
+    }
+
+    /* ── Send message ─────────────────────────────────────────── */
+    function send() {
+        const text = input.value.trim();
+        if (!text || busy || !ready) return;
+
+        input.value = '';
+        appendMsg('user', text);
+        setLoading(true);
+
+        const thinkingEl = appendMsg('assistant', '…');
+
+        fetch('/api/v1/chatbot/message/', {
+            method:  'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken':  getCsrf(),
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify({ message: text, history: history }),
+        })
+        .then(function (res) {
+            if (!res.ok) {
+                return res.json().then(function (d) {
+                    throw new Error(d.detail || d.error || 'HTTP ' + res.status);
+                });
+            }
+            return res.json();
+        })
+        .then(function (data) {
+            history.push({ role: 'user',      content: text });
+            history.push({ role: 'assistant', content: data.reply });
+            thinkingEl.textContent = data.reply;
+            // Keep history trimmed to last 20 turns (40 entries) to avoid bloat
+            if (history.length > 40) history.splice(0, history.length - 40);
+        })
+        .catch(function (err) {
+            thinkingEl.style.color = '#d9534f';
+            thinkingEl.textContent = '⚠ ' + err.message;
+        })
+        .finally(function () {
+            setLoading(false);
+        });
+    }
+
+    /* ── Panel open / close ───────────────────────────────────── */
+    function openPanel() {
+        panel.classList.add('open');
+        // Ping once per panel session (if not yet ready)
+        if (!ready && !busy) {
+            setLoading(true);
+            ping();
+        }
+    }
+    function closePanel() { panel.classList.remove('open'); }
+
+    /* ── Event listeners ─────────────────────────────────────── */
+    toggle.addEventListener('click', function () {
+        panel.classList.contains('open') ? closePanel() : openPanel();
+    });
+    closeBtn.addEventListener('click', closePanel);
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+
+    /* ── Body needs flex-column for message bubbles ───────────── */
+    body.style.display        = 'flex';
+    body.style.flexDirection  = 'column';
+    body.style.overflowY      = 'auto';
+})();
+</script>
+{% endblock %}
