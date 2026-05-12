@@ -310,3 +310,39 @@ SIGTOOLS_TOKEN_EXPIRY_MINUTES = env.int("SIGTOOLS_TOKEN_EXPIRY_MINUTES", default
 LDAP_HOST = env("LDAP_HOST", default="sig")
 LDAP_DOMAIN = env("LDAP_DOMAIN", default="sig.com")
 LDAP_BASE_DN = env("LDAP_BASE_DN", default="OU=OU User,DC=sig,DC=com")
+
+# ---------------------------------------------------------------------------
+# Logging — errors to stdout so `docker logs` captures them
+# ---------------------------------------------------------------------------
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{levelname}] {asctime} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        "apps.chatbot": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}

@@ -43,10 +43,11 @@ COPY apps/ apps/
 COPY templates/ templates/
 COPY docker/entrypoint.sh /entrypoint.sh
 
-# Own everything to django user
+# Own everything to django user and ensure apps/ is writable (for chatbot code generation)
 RUN mkdir -p /app/staticfiles && \
     chmod +x /entrypoint.sh && \
-    chown -R django:django /app /entrypoint.sh
+    chown -R django:django /app /entrypoint.sh && \
+    chmod -R u+w /app/apps
 
 USER django
 

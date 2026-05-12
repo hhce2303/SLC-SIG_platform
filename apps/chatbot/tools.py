@@ -23,177 +23,131 @@ from apps.core.exceptions import ResourceNotFound
 TOOL_SCHEMAS: list[dict] = [
     {
         "name": "list_customer_groups",
-        "description": (
-            "Lista todos los grupos de clientes registrados en el sistema. "
-            "Útil para saber a qué grupo pertenece un sitio."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": "Lista grupos de clientes. limit: máx resultados (def 5).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "Máx resultados (def 5)."}},
+            "required": [],
+        },
     },
     {
         "name": "list_sig_projects",
-        "description": "Lista todos los proyectos SIG activos con su estado y versión.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": "Lista proyectos SIG activos con estado y versión. limit: máx resultados (def 5).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "Máx resultados (def 5)."}},
+            "required": [],
+        },
     },
     {
         "name": "list_admin_users",
-        "description": "Lista todos los usuarios administradores de SIG Tools con sus roles.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": "Lista usuarios administradores con sus roles. limit: máx resultados (def 5).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "Máx resultados (def 5)."}},
+            "required": [],
+        },
     },
     {
         "name": "list_admin_roles",
-        "description": "Lista todos los roles de administración con sus permisos asociados.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": "Lista roles de administración con sus permisos. limit: máx resultados (def 5).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "Máx resultados (def 5)."}},
+            "required": [],
+        },
     },
     {
         "name": "list_admin_permissions",
-        "description": "Lista todos los permisos disponibles en el sistema.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": "Lista permisos disponibles en el sistema. limit: máx resultados (def 10).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "Máx resultados (def 10)."}},
+            "required": [],
+        },
     },
     {
         "name": "get_site_status",
-        "description": (
-            "Obtiene el estado detallado de un sitio específico: "
-            "dispositivos en línea, cámaras, servidores, etc."
-        ),
+        "description": "Estado detallado de un sitio: dispositivos, cámaras, servidores.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "site_id": {
-                    "type": "integer",
-                    "description": "ID numérico del sitio a consultar.",
-                },
+                "site_id": {"type": "integer", "description": "ID del sitio."},
             },
             "required": ["site_id"],
         },
     },
     {
         "name": "get_installation_types",
-        "description": "Lista los tipos de instalación disponibles (ej. residencial, comercial).",
+        "description": "Lista tipos de instalación disponibles.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "list_sites",
-        "description": (
-            "Lista todos los sitios activos registrados en SIG Tools con su nombre, ciudad, "
-            "estado, conteo de cámaras y dispositivos. "
-            "Úsalo para descubrir IDs de sitios antes de filtrar cámaras por site_id."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": "Lista sitios activos con nombre, ciudad, estado y conteo de cámaras. limit: máx resultados (def 10).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "Máx resultados (def 10)."}},
+            "required": [],
+        },
     },
     {
         "name": "list_cameras",
-        "description": (
-            "Lista las cámaras registradas en la base de datos de SIG Tools con toda su "
-            "información: marca, modelo, tipo, número de serie, sitio, dirección del "
-            "dispositivo asociado y estado. "
-            "Soporta filtros opcionales por sitio, marca o tipo de cámara. "
-            "Úsalo cuando el usuario pregunte por cámaras específicas o quiera un inventario."
-        ),
+        "description": "Lista cámaras de SIG Tools. Filtros opcionales: site_id, brand, camera_type, limit.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "site_id": {
-                    "type": "integer",
-                    "description": "Filtrar por ID de sitio. Usa list_sites primero para obtener el ID correcto.",
-                },
-                "brand": {
-                    "type": "string",
-                    "description": "Filtrar por nombre de marca (búsqueda parcial, ej. 'Hanwha', 'Axis').",
-                },
-                "camera_type": {
-                    "type": "string",
-                    "description": "Filtrar por tipo de cámara (búsqueda parcial, ej. 'PTZ', 'Dome', 'Bullet').",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Máximo de resultados (por defecto 100, máximo 500).",
-                },
+                "site_id": {"type": "integer", "description": "ID del sitio."},
+                "brand": {"type": "string", "description": "Marca (parcial)."},
+                "camera_type": {"type": "string", "description": "Tipo de cámara (parcial)."},
+                "limit": {"type": "integer", "description": "Máx resultados (def 100, máx 500)."},
             },
             "required": [],
         },
     },
-    # ── Service management ────────────────────────────────────────────────────
     {
         "name": "restart_service",
-        "description": (
-            "Reinicia el contenedor del servicio web (daily-log-backend) usando Docker. "
-            "Úsalo SOLO después de escribir archivos Python nuevos que requieran que el "
-            "servidor recargue el código. "
-            "ADVERTENCIA: la conexión se interrumpirá ~5-10 segundos durante el reinicio. "
-            "Siempre avisa al usuario antes de llamar esta herramienta."
-        ),
+        "description": "Reinicia el contenedor web. Usar solo tras escribir archivos nuevos. Avisa al usuario antes.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
-    # ── Code generation tools ────────────────────────────────────────────────
     {
         "name": "read_project_file",
-        "description": (
-            "Lee el contenido de un archivo del proyecto (rutas relativas a la raíz). "
-            "Úsalo siempre antes de escribir código para entender los patrones existentes. "
-            "Puede leer cualquier archivo .py excepto .env y archivos de credenciales."
-        ),
+        "description": "Lee un archivo del proyecto (ruta relativa). No lee .env ni credenciales.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Ruta relativa al archivo (ej. 'apps/inventory/views.py').",
-                },
+                "path": {"type": "string", "description": "Ruta relativa (ej. apps/inventory/views.py)."},
             },
             "required": ["path"],
         },
     },
     {
         "name": "list_project_directory",
-        "description": (
-            "Lista los archivos y carpetas en un directorio del proyecto. "
-            "Úsalo para explorar la estructura antes de crear nuevos archivos."
-        ),
+        "description": "Lista archivos y carpetas en un directorio del proyecto.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Ruta relativa al directorio (ej. 'apps/inventory'). Vacío para la raíz.",
-                },
+                "path": {"type": "string", "description": "Ruta relativa al directorio. Vacío para raíz."},
             },
             "required": [],
         },
     },
     {
         "name": "write_project_file",
-        "description": (
-            "Escribe o crea un archivo dentro del directorio apps/. "
-            "SOLO puede escribir dentro de apps/ — no tiene acceso a config/, settings/, docker/ ni .env. "
-            "Para los cambios en config/urls.py y config/settings/base.py (INSTALLED_APPS), "
-            "inclúyelos en tu respuesta de texto con instrucciones claras para el usuario."
-        ),
+        "description": "Crea o sobreescribe un archivo dentro de apps/ solamente. Para config/* mostrar en texto.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Ruta relativa dentro de apps/ (ej. 'apps/myapp/views.py').",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Contenido completo del archivo a escribir.",
-                },
-                "overwrite": {
-                    "type": "boolean",
-                    "description": "Si es true, sobreescribe el archivo si ya existe. Por defecto false.",
-                },
+                "path": {"type": "string", "description": "Ruta dentro de apps/ (ej. apps/myapp/views.py)."},
+                "content": {"type": "string", "description": "Contenido completo del archivo."},
+                "overwrite": {"type": "boolean", "description": "Sobreescribir si existe. Default false."},
             },
             "required": ["path", "content"],
         },
     },
     {
         "name": "run_django_check",
-        "description": (
-            "Ejecuta 'manage.py check' para validar que el proyecto Django "
-            "carga correctamente después de crear o modificar archivos. "
-            "Úsalo siempre después de escribir código nuevo."
-        ),
+        "description": "Ejecuta manage.py check para validar el proyecto tras crear archivos.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
@@ -241,8 +195,10 @@ def _get_installation_types(inputs: dict, user) -> Any:
 
 
 def _list_sites(inputs: dict, user) -> Any:
+    limit = int(inputs.get("limit", 10))
     sites = sel.list_sites()
-    return {"count": len(sites), "sites": sites}
+    total = len(sites)
+    return {"total": total, "showing": min(limit, total), "sites": sites[:limit]}
 
 
 def _list_cameras(inputs: dict, user) -> Any:

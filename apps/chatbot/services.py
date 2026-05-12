@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import json
+import time
 from typing import Any
 
 import anthropic
@@ -35,7 +36,7 @@ def _get_client() -> anthropic.Anthropic:
                 "ANTHROPIC_API_KEY no está configurado. "
                 "Agrega tu clave real en el archivo .env."
             )
-        _client = anthropic.Anthropic(api_key=_API_KEY)
+        _client = anthropic.Anthropic(api_key=_API_KEY, max_retries=0)
     return _client
 
 
@@ -44,149 +45,46 @@ def _get_client() -> anthropic.Anthropic:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """
-Eres el asistente de administración de SIG Systems, una plataforma de monitoreo de seguridad.
-Tienes acceso a herramientas para consultar datos del sistema en tiempo real Y para crear
-nuevos endpoints en el proyecto Django.
+Eres el asistente de administración de SIG Systems (monitoreo de seguridad).
+Responde en español. Usa herramientas para datos reales — nunca inventes.
 
-════════════════════════════════════════════════════════════════════
-REGLAS GENERALES
-════════════════════════════════════════════════════════════════════
-- Responde siempre en español, de forma clara y concisa.
-- Usa las herramientas disponibles para obtener datos reales antes de responder.
-- No inventes IDs, nombres ni datos — consulta siempre la base de datos.
-- No ejecutes operaciones de escritura sin confirmación explícita del usuario.
+PROYECTO: Django 5 + DRF. Raíz: /app (Docker).
+BDs: default→sig_dailylogs | sigtools→sigtools_beta (MySQL).
+Auth DRF: SigtoolsCookieAuthentication > JWTAuthentication. Permisos: IsAuthenticated.
 
-════════════════════════════════════════════════════════════════════
-ARQUITECTURA DEL PROYECTO (Django 5 + DRF)
-════════════════════════════════════════════════════════════════════
-Raíz del proyecto: /app  (en Docker)
+ESTRUCTURA DE APP:
+  apps/<nombre>/__init__.py, apps.py, models.py, serializers.py,
+  selectors.py (lecturas), services.py (escrituras), views.py, urls.py, admin.py
 
-Estructura de una app típica:
-  apps/<nombre>/
-    __init__.py
-    apps.py          ← AppConfig
-    models.py        ← Solo definición de datos, sin lógica
-    serializers.py   ← Solo forma de datos, sin lógica
-    selectors.py     ← Lecturas optimizadas de la BD (sin side-effects)
-    services.py      ← Lógica de negocio (escribe en BD)
-    views.py         ← Solo orquestación: deserializa → servicio/selector → Response
-    urls.py          ← path() entries
-    admin.py         ← Registros en el admin
+PATRÓN VIEWS (APIView):
+  class MiView(APIView):
+      permission_classes = [IsAuthenticated]
+      def get(self, request): return Response(MiSerializer(selectors.get(), many=True).data)
 
-Base de datos:
-  - default  → sig_dailylogs (MySQL) — apps Django normales
-  - sigtools  → sigtools_beta (MySQL) — datos de instalaciones/cámaras/sitios
+PATRÓN URLS:
+  urlpatterns = [path("items/", MiView.as_view(), name="mi-list")]
 
-Autenticación DRF (DEFAULT_AUTHENTICATION_CLASSES):
-  1. SigtoolsCookieAuthentication  ← cookie sig_token (panel web sigtools)
-  2. JWTAuthentication             ← token Bearer (mobile / API)
-  Para vistas del admin Django usar también: SessionAuthentication
+PATRÓN APPS.PY:
+  class MiAppConfig(AppConfig):
+      name = "apps.<nombre>"
 
-Permisos por defecto: IsAuthenticated
+SQL sigtools (SIEMPRE %s, nunca f-string):
+  with connections["sigtools"].cursor() as cur:
+      cur.execute("SELECT id FROM tabla WHERE x=%s", [val])
+      cols=[c[0] for c in cur.description]
+      return [dict(zip(cols,r)) for r in cur.fetchall()]
 
-════════════════════════════════════════════════════════════════════
-PATRONES DE CÓDIGO (OBLIGATORIOS)
-════════════════════════════════════════════════════════════════════
+WORKFLOW ENDPOINT NUEVO:
+1. list_project_directory("apps") → ver apps existentes
+2. read_project_file de app similar → copiar patrón
+3. write_project_file para cada archivo en apps/<nueva_app>/
+4. run_django_check → validar
+5. Mostrar en texto los 2 pasos manuales:
+   - config/settings/base.py LOCAL_APPS: agregar "apps.<nueva_app>"
+   - config/urls.py api_v1: agregar path("<prefix>/", include("apps.<nueva_app>.urls"))
 
-## views.py — APIView pattern
-```python
-from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.request import Request
-from rest_framework.response import Response
-from rest_framework import status
-from apps.<nombre> import selectors, services
-from apps.<nombre>.serializers import MiSerializer
-
-class MiListView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request: Request) -> Response:
-        data = selectors.get_mis_items()
-        return Response(MiSerializer(data, many=True).data)
-
-    def post(self, request: Request) -> Response:
-        ser = MiSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        obj = services.crear_item(ser.validated_data)
-        return Response(MiSerializer(obj).data, status=status.HTTP_201_CREATED)
-```
-
-## serializers.py — sin lógica
-```python
-from rest_framework import serializers
-from apps.<nombre>.models import MiModelo
-
-class MiSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = MiModelo
-        fields = ("id", "nombre", "created_at")
-```
-
-## urls.py
-```python
-from django.urls import path
-from apps.<nombre>.views import MiListView, MiDetailView
-
-urlpatterns = [
-    path("items/",           MiListView.as_view(),   name="mi-app-list"),
-    path("items/<int:pk>/",  MiDetailView.as_view(), name="mi-app-detail"),
-]
-```
-
-## apps.py
-```python
-from django.apps import AppConfig
-
-class MiAppConfig(AppConfig):
-    name = "apps.<nombre>"
-    verbose_name = "<Nombre legible>"
-```
-
-## Consultas a sigtools_beta (BD externa)
-```python
-from django.db import connections
-_DB = "sigtools"
-
-def mis_datos() -> list[dict]:
-    sql = "SELECT id, nombre FROM mi_tabla WHERE deleted_at IS NULL"
-    with connections[_DB].cursor() as cur:
-        cur.execute(sql)
-        cols = [c[0] for c in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
-```
-NUNCA usar f-strings o % en SQL. Siempre usar %s con parámetros.
-
-════════════════════════════════════════════════════════════════════
-WORKFLOW PARA CREAR UN NUEVO ENDPOINT
-════════════════════════════════════════════════════════════════════
-1. list_project_directory("apps") → explorar apps existentes
-2. read_project_file de un app similar → copiar patrones exactos
-3. write_project_file para cada archivo nuevo dentro de apps/<nueva_app>/
-4. run_django_check → validar que no hay errores de importación
-5. Mostrar al usuario (en tu respuesta de texto) las DOS líneas de config manual:
-
-   **Paso manual 1** — En config/settings/base.py, agregar a LOCAL_APPS:
-   ```python
-   "apps.<nueva_app>",
-   ```
-
-   **Paso manual 2** — En config/urls.py, agregar a api_v1:
-   ```python
-   path("<prefix>/", include("apps.<nueva_app>.urls")),
-   ```
-
-IMPORTANTE: write_project_file solo puede escribir dentro de apps/.
-Para config/settings/base.py y config/urls.py, siempre muéstralos en el texto.
-
-════════════════════════════════════════════════════════════════════
-URL BASE DE LA API
-════════════════════════════════════════════════════════════════════
-Todos los endpoints se montan bajo: /api/v1/<prefix>/
-Ejemplos de endpoints existentes:
-  /api/v1/inventory/articles/
-  /api/v1/chatbot/message/
-  /api/v1/installations/
+write_project_file: SOLO dentro de apps/. Para config/* mostrar en texto.
+Endpoints bajo: /api/v1/<prefix>/
 """.strip()
 
 _MAX_TOOL_ROUNDS = 15  # More rounds needed for code generation (read → write → check)
@@ -210,17 +108,13 @@ def handle_message(message: str, history: list[dict], user) -> str:
     """
     client = _get_client()
 
-    # Build message list: history + new user message
-    messages: list[dict] = list(history) + [{"role": "user", "content": message}]
+    # Keep only the last 6 history turns (3 user+assistant pairs) to limit token growth.
+    # Full history can carry 5-10K tokens of prior tool results that Claude doesn't need.
+    trimmed_history = list(history)[-6:]
+    messages: list[dict] = trimmed_history + [{"role": "user", "content": message}]
 
     for _ in range(_MAX_TOOL_ROUNDS):
-        response = client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=4096,
-            system=_SYSTEM_PROMPT,
-            tools=tool_registry.TOOL_SCHEMAS,
-            messages=messages,
-        )
+        response = _create_with_retry(client, messages)
 
         # Pure text response — done
         if response.stop_reason == "end_turn":
@@ -229,6 +123,10 @@ def handle_message(message: str, history: list[dict], user) -> str:
         # Claude wants to call tools
         if response.stop_reason == "tool_use":
             tool_results = _execute_tool_calls(response, user)
+
+            # Before appending, compress old tool_result messages (keep only last round fresh).
+            # This prevents accumulating large JSON payloads across many tool rounds.
+            _compress_old_tool_results(messages)
 
             # Append Claude's response + tool results to conversation
             messages.append({"role": "assistant", "content": response.content})
@@ -244,6 +142,51 @@ def handle_message(message: str, history: list[dict], user) -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_RETRY_DELAYS = (15, 30, 60)  # seconds to wait on successive 429s
+
+
+def _compress_old_tool_results(messages: list[dict], max_chars: int = 300) -> None:
+    """
+    Replace content of tool_result blocks in all but the last user message
+    with a short summary. This prevents old large JSON results from being
+    re-sent on every subsequent API call.
+    """
+    # Find indices of user messages that contain tool_result blocks
+    tool_result_indices = [
+        i for i, m in enumerate(messages)
+        if m["role"] == "user" and isinstance(m.get("content"), list)
+        and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])
+    ]
+    # Keep the most recent one intact — only compress older ones
+    for idx in tool_result_indices[:-1]:
+        compressed = []
+        for block in messages[idx]["content"]:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                content = block.get("content", "")
+                if isinstance(content, str) and len(content) > max_chars:
+                    block = {**block, "content": content[:max_chars] + " …[comprimido]"}
+            compressed.append(block)
+        messages[idx] = {**messages[idx], "content": compressed}
+
+
+def _create_with_retry(client: anthropic.Anthropic, messages: list[dict]):
+    """Call client.messages.create, re-raising RateLimitError as a user-friendly message."""
+    try:
+        return client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=4096,
+            system=_SYSTEM_PROMPT,
+            tools=tool_registry.TOOL_SCHEMAS,
+            messages=messages,
+        )
+    except anthropic.RateLimitError:
+        raise RuntimeError(
+            "Límite de tokens alcanzado (10 000 tokens/min). "
+            "Por favor espera 60 segundos e intenta de nuevo. "
+            "Si necesitas crear endpoints, considera dividir la tarea en pasos más pequeños."
+        )
+
 
 def _execute_tool_calls(response, user) -> list[dict]:
     """Execute all tool_use blocks in a response and return tool_result list."""

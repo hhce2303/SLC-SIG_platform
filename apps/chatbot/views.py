@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -6,6 +8,8 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 
 from .serializers import ChatMessageSerializer
 from . import services
+
+logger = logging.getLogger(__name__)
 
 
 class ChatbotMessageView(APIView):
@@ -37,6 +41,13 @@ class ChatbotMessageView(APIView):
                 {"error": str(exc)},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
+        except Exception as exc:
+            # Anthropic API errors, context overflow, etc.
+            logger.exception("Chatbot error: %s", exc)
+            return Response(
+                {"error": f"Error interno del asistente: {type(exc).__name__}: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         return Response({"reply": reply})
 
@@ -59,6 +70,12 @@ class ChatbotPingView(APIView):
             return Response(
                 {"error": str(exc)},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception as exc:
+            logger.exception("Chatbot ping error: %s", exc)
+            return Response(
+                {"error": f"Error de conectividad: {type(exc).__name__}: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         return Response(result)
