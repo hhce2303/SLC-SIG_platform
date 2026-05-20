@@ -53,6 +53,32 @@ class UserSerializer(serializers.Serializer):
 # Sites
 # ---------------------------------------------------------------------------
 
+class SiteListItemSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    location = serializers.CharField(allow_null=True)
+    address = serializers.CharField(allow_null=True)
+
+
+class LogEntrySerializer(serializers.Serializer):
+    date = serializers.CharField(allow_null=True)
+    action = serializers.CharField()
+    user = serializers.CharField()
+
+
+class SiteDashboardItemSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    customer_group_id = serializers.IntegerField(allow_null=True)
+    status = serializers.CharField(allow_null=True)
+    address = serializers.CharField(allow_null=True)
+    location = serializers.CharField(allow_null=True)
+    responsable = serializers.CharField(allow_null=True)
+    it_manager = serializers.CharField(allow_null=True)
+    notes = serializers.CharField(allow_null=True)
+    log = LogEntrySerializer(many=True)
+
+
 class SiteCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     customer_group_id = serializers.IntegerField()
@@ -78,6 +104,63 @@ class InventoryItemSerializer(serializers.Serializer):
     qty = serializers.IntegerField()
 
 
+class SiteCameraModelSerializer(serializers.Serializer):
+    """Matches the frontend mock catalog shape exactly."""
+    id = serializers.CharField()
+    name = serializers.CharField()
+    brand = serializers.CharField()
+    serial = serializers.CharField(allow_null=True)
+    ip = serializers.CharField(allow_null=True)
+    resolution = serializers.CharField(allow_null=True)
+    type = serializers.CharField(allow_null=True)
+    category = serializers.CharField()
+    subtype = serializers.CharField()
+    lensType = serializers.CharField(allow_null=True)
+    rango_lente_mm = serializers.ListField(child=serializers.FloatField(), allow_null=True)
+    rango_fov_grados = serializers.ListField(child=serializers.FloatField(), allow_null=True)
+    poe_watts = serializers.FloatField(allow_null=True)
+    bandwidth_mbps = serializers.FloatField(allow_null=True)
+
+
+class SiteSwitchModelSerializer(serializers.Serializer):
+    """Matches the frontend mock switch catalog shape exactly."""
+    id = serializers.CharField()
+    name = serializers.CharField()
+    brand = serializers.CharField()
+    resolution = serializers.CharField(allow_null=True)
+    type = serializers.CharField(allow_null=True)
+    category = serializers.CharField()
+    subtype = serializers.CharField()
+    poe_watts = serializers.FloatField(allow_null=True)
+    bandwidth_mbps = serializers.FloatField(allow_null=True)
+    poe_budget_watts = serializers.FloatField(allow_null=True)
+    uplink_mbps = serializers.FloatField(allow_null=True)
+
+
+class SiteDeviceCatalogItemSerializer(serializers.Serializer):
+    """
+    Unified shape for all device types in a site catalog.
+    Superset of SiteCameraModelSerializer and SiteSwitchModelSerializer.
+    Fields that don't apply to a given device type are null.
+    """
+    id = serializers.CharField()
+    name = serializers.CharField()
+    brand = serializers.CharField()
+    serial = serializers.CharField(allow_null=True)
+    ip = serializers.CharField(allow_null=True)
+    resolution = serializers.CharField(allow_null=True)
+    type = serializers.CharField(allow_null=True)
+    category = serializers.CharField()
+    subtype = serializers.CharField()
+    lensType = serializers.CharField(allow_null=True)
+    rango_lente_mm = serializers.ListField(child=serializers.FloatField(), allow_null=True)
+    rango_fov_grados = serializers.ListField(child=serializers.FloatField(), allow_null=True)
+    poe_watts = serializers.FloatField(allow_null=True)
+    bandwidth_mbps = serializers.FloatField(allow_null=True)
+    poe_budget_watts = serializers.FloatField(allow_null=True)
+    uplink_mbps = serializers.FloatField(allow_null=True)
+
+
 # ---------------------------------------------------------------------------
 # Installations / Projects
 # ---------------------------------------------------------------------------
@@ -98,8 +181,49 @@ class MessageResponseSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
-# Sync
+# Site Onboarding (site + installation in one request)
 # ---------------------------------------------------------------------------
+
+class SiteOnboardingSerializer(serializers.Serializer):
+    # --- Site fields ---
+    name = serializers.CharField(max_length=255)
+    customer_group_id = serializers.IntegerField()
+    ip_address = serializers.IPAddressField(default="0.0.0.0")
+    address = serializers.CharField(max_length=512, required=False, allow_blank=True, allow_null=True)
+    city = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+    state_code = serializers.CharField(max_length=10, required=False, allow_blank=True, allow_null=True)
+    country_code = serializers.CharField(max_length=10, required=False, allow_blank=True, allow_null=True)
+    teams_channelid = serializers.CharField(max_length=255, default="", allow_blank=True)
+    teams_teamid = serializers.CharField(max_length=255, default="", allow_blank=True)
+    # --- Installation fields ---
+    it_lead_tech_id = serializers.IntegerField()
+    installation_type_id = serializers.IntegerField()
+    project_owner = serializers.IntegerField(required=False, allow_null=True)
+    total_cameras = serializers.IntegerField(default=0, min_value=0)
+    total_views = serializers.IntegerField(default=0, min_value=0)
+    starting_date = serializers.DateTimeField(required=False, allow_null=True)
+    limit_date = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class SiteOnboardingResponseSerializer(serializers.Serializer):
+    installation_id = serializers.IntegerField()
+    site_id = serializers.IntegerField()
+    site_name = serializers.CharField()
+    status = serializers.CharField()
+    project_owner = serializers.IntegerField(allow_null=True)
+    project_owner_name = serializers.CharField(allow_null=True)
+    it_lead_tech_id = serializers.IntegerField(allow_null=True)
+    it_lead_tech_name = serializers.CharField(allow_null=True)
+    installation_type_id = serializers.IntegerField()
+    installation_type = serializers.CharField(allow_null=True)
+    total_cameras = serializers.IntegerField(allow_null=True)
+    total_views = serializers.IntegerField(allow_null=True)
+    starting_date = serializers.DateTimeField(allow_null=True)
+    limit_date = serializers.DateTimeField(allow_null=True)
+    total_hours = serializers.FloatField()
+    created_at = serializers.DateTimeField()
+
+
 
 class HardwareAddedSerializer(serializers.Serializer):
     temp_id = serializers.CharField()

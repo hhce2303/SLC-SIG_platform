@@ -7,6 +7,7 @@ app_name = "installations"
 urlpatterns = [
     # --- Catalog ---
     path("catalog/cameras/", views.CameraCatalogView.as_view(), name="catalog-cameras"),
+    path("catalog/camera-models/", views.CameraModelCatalogView.as_view(), name="catalog-camera-models"),
     path("catalog/devices/", views.DeviceCatalogView.as_view(), name="catalog-devices"),
     path("catalog/vms/", views.VMSCatalogView.as_view(), name="catalog-vms"),
     path("catalog/installation-types/", views.InstallationTypesCatalogView.as_view(), name="catalog-installation-types"),
@@ -24,9 +25,11 @@ urlpatterns = [
 
     # --- Sites ---
     path("sites/", views.SiteListView.as_view(), name="site-list"),
+    path("onboarding/", views.SiteOnboardingView.as_view(), name="site-onboarding"),
     path("sites/<int:site_id>/", views.SiteDetailView.as_view(), name="site-detail"),
     path("sites/<int:site_id>/status/", views.SiteStatusView.as_view(), name="site-status"),
     path("sites/<int:site_id>/inventory/", views.SiteInventoryView.as_view(), name="site-inventory"),
+    path("sites/<int:site_id>/catalog/", views.SiteDeviceCatalogView.as_view(), name="site-device-catalog"),
 
     # --- Projects (Installations) ---
     path("projects/", views.ProjectListView.as_view(), name="project-list"),

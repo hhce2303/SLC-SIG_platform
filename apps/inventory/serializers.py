@@ -110,3 +110,14 @@ class DashboardStatsSerializer(serializers.Serializer):
     enMantenimiento = serializers.IntegerField()
     optimo = serializers.IntegerField()
     total = serializers.IntegerField()
+
+
+# ---------------------------------------------------------------------------
+# Cameras by site
+# ---------------------------------------------------------------------------
+
+class CamerasBySiteSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    brand = serializers.CharField()
+    model = serializers.CharField()
+    camera_type = serializers.CharField()

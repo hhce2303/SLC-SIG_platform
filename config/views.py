@@ -16,7 +16,7 @@ from django.template.response import TemplateResponse
 @staff_member_required
 def db_dashboard(request: HttpRequest) -> HttpResponse:
     databases = []
-    for alias in ("default", "inventory"):
+    for alias in ("default", "sigtools"):
         db_settings = connections[alias].settings_dict
         status = "offline"
         error = ""
@@ -29,12 +29,12 @@ def db_dashboard(request: HttpRequest) -> HttpResponse:
 
         databases.append({
             "alias": alias,
-            "label": "Daily Logs" if alias == "default" else "Inventory",
+            "label": "Daily Logs" if alias == "default" else "SIG Tools",
             "host": db_settings.get("HOST", ""),
             "name": db_settings.get("NAME", ""),
             "status": status,
             "error": error,
-            "admin_url": "/admin/" if alias == "default" else "/admin/inventory/",
+            "admin_url": "/admin/" if alias == "default" else "/admin/sigtools/",
         })
 
     return TemplateResponse(request, "admin/db_dashboard.html", {

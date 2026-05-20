@@ -150,6 +150,51 @@ TOOL_SCHEMAS: list[dict] = [
         "description": "Ejecuta manage.py check para validar el proyecto tras crear archivos.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "generate_endpoint",
+        "description": (
+            "Genera automáticamente código Django (selector, serializer, view, urls) "
+            "usando el modelo local de IA (Ollama + qwen2.5-coder). "
+            "Usa esto cuando el usuario pida crear un endpoint nuevo y quiera usar la IA local. "
+            "El resultado queda en el audit log para revisión del admin antes de desplegarse. "
+            "Requiere: user_request (descripción del endpoint), target_app (nombre del app Django destino). "
+            "Opcional: tables_used (lista de tablas MySQL relevantes para el schema)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_request": {
+                    "type": "string",
+                    "description": "Descripción clara del endpoint a generar (ej: 'endpoint GET para listar cámaras activas de un site').",
+                },
+                "target_app": {
+                    "type": "string",
+                    "description": "Nombre del app Django donde se generará el código (ej: 'cameras', 'inventory').",
+                },
+                "tables_used": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Lista de tablas MySQL a usar como contexto del schema (opcional).",
+                },
+            },
+            "required": ["user_request", "target_app"],
+        },
+    },
+    {
+        "name": "list_codegen_audits",
+        "description": "Lista los últimos registros del audit log de generación de código. Muestra estado (pending/approved/deployed/rejected) y el request original.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filtrar por estado: pending, approved, modified, rejected, deployed, failed. Vacío = todos.",
+                },
+                "limit": {"type": "integer", "description": "Máx resultados (def 10)."},
+            },
+            "required": [],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -253,7 +298,7 @@ def _validate_write_path(rel_path: str) -> Path:
     """
     Validates a write path:
     - Must be relative
-    - Must resolve to within apps/ directory only
+    - Must resolve to within apps/ or config/ directory
     - No path traversal
     """
     if not rel_path or not rel_path.strip():
@@ -263,13 +308,13 @@ def _validate_write_path(rel_path: str) -> Path:
         raise ValueError("Path must be relative, not absolute.")
     root = _get_project_root()
     abs_path = (root / norm).resolve()
-    apps_dir = (root / "apps").resolve()
-    # Strict: must be inside apps/
-    if not str(abs_path).startswith(str(apps_dir) + os.sep) and abs_path != apps_dir:
+    apps_dir   = (root / "apps").resolve()
+    config_dir = (root / "config").resolve()
+    inside_apps   = str(abs_path).startswith(str(apps_dir) + os.sep) or abs_path == apps_dir
+    inside_config = str(abs_path).startswith(str(config_dir) + os.sep) or abs_path == config_dir
+    if not inside_apps and not inside_config:
         raise ValueError(
-            f"Write access is restricted to apps/ directory. "
-            f"For changes to config/urls.py or config/settings/base.py, "
-            f"include them in your text response with instructions for the user."
+            f"Write access is restricted to apps/ and config/ directories."
         )
     return abs_path
 
@@ -366,7 +411,7 @@ def _restart_service(inputs: dict, user) -> Any:
             self.sock.connect(self._socket_path)
 
     def _do_restart():
-        time.sleep(2)
+        time.sleep(15)  # Give Claude time to finish the response before restarting
         try:
             conn = _UnixHTTPConnection(sock_path)
             # t=5 → 5-second grace period before SIGKILL
@@ -380,7 +425,7 @@ def _restart_service(inputs: dict, user) -> Any:
     return {
         "status": "restarting",
         "message": (
-            "Reinicio iniciado. El servicio se reiniciará en ~2 segundos. "
+            "Reinicio programado en 15 segundos. "
             "La conexión se interrumpirá unos 5-10 segundos — es normal."
         ),
     }
@@ -402,12 +447,87 @@ def _run_django_check(inputs: dict, user) -> Any:
     }
 
 
+def _generate_endpoint(inputs: dict, user) -> Any:
+    """
+    Triggers the full AI code generation pipeline:
+      schema_inspector → Claude prompt engineering → Ollama local model → AuditLog
+    Blocks until Ollama responds (~45-90s with GPU on dedicated PC).
+    Returns the generated code so Claude can display it directly in the chat.
+    """
+    from apps.codegen.services import generate_code
+
+    user_request = inputs.get("user_request", "").strip()
+    target_app   = inputs.get("target_app", "").strip()
+    tables_used  = inputs.get("tables_used", [])
+
+    if not user_request:
+        raise ValueError("user_request es requerido.")
+    if not target_app:
+        raise ValueError("target_app es requerido.")
+
+    audit = generate_code(
+        user_request=user_request,
+        target_app=target_app,
+        tables=tables_used,
+    )
+
+    files_generated = list(audit.generated_code.keys()) if audit.generated_code else []
+
+    # Build readable code sections for Claude to display in chat
+    code_sections: list[str] = []
+    for filename, code in (audit.generated_code or {}).items():
+        code_sections.append(f"=== {filename} ===\n```python\n{code}\n```")
+    code_display = "\n\n".join(code_sections) if code_sections else "Sin código generado — revisar logs."
+
+    return {
+        "audit_id": audit.pk,
+        "status": audit.status,
+        "target_app": audit.target_app,
+        "files_generated": files_generated,
+        "generated_code": code_display,
+        "approve_url": f"/api/v1/codegen/audits/{audit.pk}/approve/",
+        "note": (
+            f"Código generado en audit #{audit.pk}. "
+            f"Para desplegarlo: POST {'/api/v1/codegen/audits/' + str(audit.pk) + '/approve/'}"
+        ),
+    }
+
+
+def _list_codegen_audits(inputs: dict, user) -> Any:
+    from apps.codegen.models import CodeGenAudit
+
+    limit  = int(inputs.get("limit", 10))
+    status = inputs.get("status", "").strip()
+
+    qs = CodeGenAudit.objects.select_related("reviewed_by").order_by("-created_at")
+    if status:
+        qs = qs.filter(status=status)
+
+    audits = qs[:limit]
+    return {
+        "total": qs.count(),
+        "showing": len(audits),
+        "audits": [
+            {
+                "id": a.pk,
+                "status": a.status,
+                "target_app": a.target_app,
+                "user_request": a.user_request[:120],
+                "files": list(a.generated_code.keys()),
+                "created_at": a.created_at.strftime("%Y-%m-%d %H:%M"),
+                "reviewed_by": a.reviewed_by.username if a.reviewed_by else None,
+            }
+            for a in audits
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
-# write_project_file and restart_service require is_staff
-WRITE_TOOLS: set[str] = {"write_project_file", "restart_service"}
+# Tools that require is_staff to execute
+WRITE_TOOLS: set[str] = {"write_project_file", "restart_service", "generate_endpoint"}
 
 HANDLERS: dict[str, Any] = {
     "list_customer_groups":   _list_customer_groups,
@@ -421,11 +541,14 @@ HANDLERS: dict[str, Any] = {
     "list_cameras":           _list_cameras,
     # Service management
     "restart_service":        _restart_service,
-    # Code generation
+    # Code generation (manual)
     "read_project_file":      _read_project_file,
     "list_project_directory": _list_project_directory,
     "write_project_file":     _write_project_file,
     "run_django_check":       _run_django_check,
+    # AI-powered code generation
+    "generate_endpoint":      _generate_endpoint,
+    "list_codegen_audits":    _list_codegen_audits,
 }
 
 

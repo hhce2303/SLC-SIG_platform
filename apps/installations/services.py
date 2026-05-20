@@ -49,6 +49,113 @@ def create_site(data: dict) -> int:
         return cur.lastrowid
 
 
+def create_site_with_installation(data: dict) -> dict:
+    """
+    Atomically creates a site and its first installation.
+
+    Steps:
+    1. Look up the 'Active' inst_status_id dynamically from inst_statuses.
+    2. Insert the site row; capture site_id.
+    3. Insert the installation row using site_id + active status.
+       project_owner is hardcoded to user_id 48 unless provided.
+    4. Return the full installation record joined with site and status names.
+
+    Raises ValueError if Active status is not found in inst_statuses.
+    Both inserts are wrapped in transaction.atomic(using=_DB) — either both
+    succeed or neither is committed.
+    """
+    _PROJECT_OWNER_DEFAULT = None
+
+    with transaction.atomic(using=_DB):
+        # 1. Resolve Active status ID
+        with connections[_DB].cursor() as cur:
+            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Active' LIMIT 1")
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError("Active status not found in inst_statuses")
+            active_status_id: int = row[0]
+
+        # 2. Insert site
+        site_sql = """
+            INSERT INTO sites
+                (name, customer_group_id, ip_address, teams_channelid, teams_teamid,
+                 address, city, state_code, country_code,
+                 monitored, maintenance, receive_notifications,
+                 cameras_count, total_devices, devices_down,
+                 created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 1, 1, 0, 0, 0, NOW(), NOW())
+        """
+        with connections[_DB].cursor() as cur:
+            cur.execute(site_sql, [
+                data["name"],
+                data["customer_group_id"],
+                data.get("ip_address", "0.0.0.0"),
+                data.get("teams_channelid", ""),
+                data.get("teams_teamid", ""),
+                data.get("address") or None,
+                data.get("city") or None,
+                data.get("state_code") or None,
+                data.get("country_code") or None,
+            ])
+            site_id: int = cur.lastrowid
+
+        # 3. Insert installation
+        inst_sql = """
+            INSERT INTO installations
+                (site_id, inst_status_id, it_lead_tech_id, installation_type_id,
+                 project_owner, Total_cameras, Total_views,
+                 starting_date, limit_date,
+                 total_hours, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0.0, NOW(), NOW())
+        """
+        with connections[_DB].cursor() as cur:
+            cur.execute(inst_sql, [
+                site_id,
+                active_status_id,
+                data["it_lead_tech_id"],
+                data["installation_type_id"],
+                data.get("project_owner") or _PROJECT_OWNER_DEFAULT,
+                data.get("total_cameras", 0),
+                data.get("total_views", 0),
+                data.get("starting_date") or None,
+                data.get("limit_date") or None,
+            ])
+            installation_id: int = cur.lastrowid
+
+        # 4. Fetch and return the full installation record
+        fetch_sql = """
+            SELECT
+                i.id                AS installation_id,
+                i.site_id,
+                s.name              AS site_name,
+                ist.name            AS status,
+                i.project_owner,
+                u_owner.name        AS project_owner_name,
+                i.it_lead_tech_id,
+                u_tech.name         AS it_lead_tech_name,
+                i.installation_type_id,
+                it.name             AS installation_type,
+                i.Total_cameras     AS total_cameras,
+                i.Total_views       AS total_views,
+                i.starting_date,
+                i.limit_date,
+                i.total_hours,
+                i.created_at
+            FROM installations i
+            JOIN sites s               ON s.id   = i.site_id
+            JOIN inst_statuses ist     ON ist.id  = i.inst_status_id
+            LEFT JOIN users u_owner    ON u_owner.id = i.project_owner
+            LEFT JOIN users u_tech     ON u_tech.id  = i.it_lead_tech_id
+            LEFT JOIN installation_types it ON it.id = i.installation_type_id
+            WHERE i.id = %s
+        """
+        with connections[_DB].cursor() as cur:
+            cur.execute(fetch_sql, [installation_id])
+            cols = [c[0] for c in cur.description]
+            record = cur.fetchone()
+            return dict(zip(cols, record))
+
+
 def delete_site(site_id: int) -> bool:
     """
     Soft-deletes a site and cascades to all its active installations.

@@ -35,3 +35,20 @@ def get_dashboard_stats() -> dict[str, int]:
         "optimo": articles.filter(status__in=["activo", "reparado"]).count(),
         "total": articles.count(),
     }
+
+
+def get_cameras_by_site(site_id: int) -> list[dict]:
+    """Obtiene cámaras de un sitio: id, brand, model, camera_type."""
+    from django.db import connections
+
+    with connections["default"].cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, brand, model, camera_type
+            FROM cameras
+            WHERE site_id = %s
+            """,
+            [site_id],
+        )
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]

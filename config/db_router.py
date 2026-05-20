@@ -1,16 +1,36 @@
-"""
-Database routers.
+"""Database routers.
 
-InventoryRouter  — apps.inventory  → 'inventory' database.
 SchedulesRouter  — apps.schedules  → 'schedules' database.
 SigtoolsRouter   — apps.sigtools   → 'sigtools' database.
+apps.inventory   → 'default' (sig_dailylogs). Tablas propias pendientes.
 Everything else uses 'default'.
 """
 
 from __future__ import annotations
 
-INVENTORY_APP = "inventory"
+# TODO: cuando inventory tenga tablas propias, descomentar InventoryRouter
+# INVENTORY_APP = "inventory"
 SCHEDULES_APP = "schedules"
+
+
+class InventoryRouter:
+    """Uncomment when inventory gets its own tables on a separate DB."""
+    def db_for_read(self, model, **hints):
+        if model._meta.app_label == "inventory":
+            return "inventory"
+        return None
+
+    def db_for_write(self, model, **hints):
+        if model._meta.app_label == "inventory":
+            return "inventory"
+        return None
+
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if app_label == "inventory":
+            return db == "inventory"
+        if db == "inventory":
+            return False
+        return None
 
 
 class SchedulesRouter:

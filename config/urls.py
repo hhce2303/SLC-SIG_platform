@@ -27,7 +27,11 @@ api_v1 = [
     path("platform/", include("apps.platform.urls")),
     path("installations/", include("apps.installations.urls")),
     path("web-auth/", include("apps.sigtools_auth.urls")),
+    path("sigtools/", include("apps.sigtools.urls")),
+    path("layers/", include("apps.layers.urls")),
     path("chatbot/", include("apps.chatbot.urls")),
+    path("codegen/", include("apps.codegen.urls")),
+    path("test/", include("apps.test.urls")),
 ]
 
 urlpatterns = [

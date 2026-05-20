@@ -91,6 +91,7 @@ class Site(_SigtoolsBase):
     monitored = models.BooleanField(default=True)
     maintenance = models.BooleanField(default=True)
     receive_notifications = models.BooleanField(default=True)
+    address = models.TextField(null=True, blank=True)
     installation_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(null=True, blank=True)

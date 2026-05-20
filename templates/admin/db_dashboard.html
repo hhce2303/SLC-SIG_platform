@@ -299,9 +299,36 @@
         background: #205067;
         transform: scale(1.07);
     }
+    /* ── code rendering inside chatbot ───────────────────────── */
+    .chatbot-body pre {
+        background: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 10px 12px;
+        overflow-x: auto;
+        font-size: 0.80em;
+        margin: 6px 0;
+        white-space: pre;
+    }
+    .chatbot-body pre code {
+        background: none;
+        padding: 0;
+        font-family: 'Consolas', 'Courier New', monospace;
+        color: #e6edf3;
+    }
+    .chatbot-body code {
+        background: #1f2937;
+        padding: 1px 5px;
+        border-radius: 3px;
+        font-size: 0.88em;
+        font-family: 'Consolas', 'Courier New', monospace;
+        color: #79c0ff;
+    }
+    .chatbot-body strong { color: #93c5fd; }
+    .chatbot-body .msg-bot { white-space: normal; }
 
     /* ── scale ─────────────────────────────────────────────────────── */
-    .dashboard-scale { zoom: 1.5; }
+    .dashboard-scale { zoom: 1.2; }
 </style>
 
 <div class="dashboard-scale">
@@ -443,26 +470,61 @@
         return m ? m[1] : '';
     }
 
+    /* ── Markdown renderer (no external libs) ─────────────────── */
+    function renderMarkdown(text) {
+        function esc(s) {
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+        function renderInline(s) {
+            return esc(s)
+                .replace(/^### (.+)$/gm, '<strong>$1</strong>')
+                .replace(/^## (.+)$/gm, '<strong>$1</strong>')
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/\n\n/g, '<br><br>')
+                .replace(/\n/g, '<br>');
+        }
+        let result = '';
+        const codeRe = /```(\w*)\n?([\s\S]*?)```/g;
+        let last = 0, m;
+        while ((m = codeRe.exec(text)) !== null) {
+            result += renderInline(text.slice(last, m.index));
+            result += '<pre><code>' + esc(m[2].replace(/\n$/, '')) + '</code></pre>';
+            last = m.index + m[0].length;
+        }
+        result += renderInline(text.slice(last));
+        return result;
+    }
+
     /* ── Render helpers ───────────────────────────────────────── */
     function appendMsg(role, text) {
         const wrap = document.createElement('div');
+        const isUser = role === 'user';
         wrap.style.cssText = [
             'margin: 6px 0',
             'padding: 7px 11px',
             'border-radius: 8px',
             'max-width: 92%',
-            'white-space: pre-wrap',
             'word-break: break-word',
             'font-size: 0.85em',
             'line-height: 1.5',
-            role === 'user'
-                ? 'align-self:flex-end;background:#417690;color:#fff;margin-left:auto'
+            isUser
+                ? 'align-self:flex-end;background:#417690;color:#fff;margin-left:auto;white-space:pre-wrap'
                 : 'align-self:flex-start;background:#2a2a2a;color:#e8e8e8',
         ].join(';');
-        wrap.textContent = text;
+        if (isUser) {
+            wrap.textContent = text;
+        } else {
+            wrap.innerHTML = renderMarkdown(text);
+        }
         body.appendChild(wrap);
         body.scrollTop = body.scrollHeight;
         return wrap;
+    }
+
+    function _updateBotMsg(el, text) {
+        el.innerHTML = renderMarkdown(text);
+        body.scrollTop = body.scrollHeight;
     }
 
     function appendStatus(html, color) {
@@ -539,7 +601,7 @@
         .then(function (data) {
             history.push({ role: 'user',      content: text });
             history.push({ role: 'assistant', content: data.reply });
-            thinkingEl.textContent = data.reply;
+            _updateBotMsg(thinkingEl, data.reply);
             // Keep history trimmed to last 20 turns (40 entries) to avoid bloat
             if (history.length > 40) history.splice(0, history.length - 40);
         })

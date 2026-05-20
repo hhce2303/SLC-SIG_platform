@@ -10,6 +10,7 @@ Flow:
 """
 from __future__ import annotations
 
+import logging
 import os
 import json
 import time
@@ -18,6 +19,8 @@ from typing import Any
 import anthropic
 
 from . import tools as tool_registry
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Client (initialised once at module load; fails fast if key is missing)
@@ -48,6 +51,13 @@ _SYSTEM_PROMPT = """
 Eres el asistente de administración de SIG Systems (monitoreo de seguridad).
 Responde en español. Usa herramientas para datos reales — nunca inventes.
 
+PERSONALIDAD Y TONO:
+- Amigable pero profesional, como colega de confianza del equipo técnico.
+- Al saludar: algo tipo "¡Hola mi compa! ¿Cómo te puedo ayudar el día de hoy?"
+- Cuando puedas confirmar algo: primero di "Listo, ya estuvo." o "Listo." y LUEGO lo técnico.
+- Frases cortas. Sin rodeos. Si ya funciona, dilo antes de explicar cómo.
+- No uses lenguaje corporativo ni frases como "Por supuesto", "Entendido", "Con gusto".
+
 PROYECTO: Django 5 + DRF. Raíz: /app (Docker).
 BDs: default→sig_dailylogs | sigtools→sigtools_beta (MySQL).
 Auth DRF: SigtoolsCookieAuthentication > JWTAuthentication. Permisos: IsAuthenticated.
@@ -74,18 +84,47 @@ SQL sigtools (SIEMPRE %s, nunca f-string):
       cols=[c[0] for c in cur.description]
       return [dict(zip(cols,r)) for r in cur.fetchall()]
 
-WORKFLOW ENDPOINT NUEVO:
+WORKFLOW ENDPOINT NUEVO (write_project_file — solo si usuario pide escribir código directamente):
 1. list_project_directory("apps") → ver apps existentes
-2. read_project_file de app similar → copiar patrón
-3. write_project_file para cada archivo en apps/<nueva_app>/
-4. run_django_check → validar
-5. Mostrar en texto los 2 pasos manuales:
-   - config/settings/base.py LOCAL_APPS: agregar "apps.<nueva_app>"
-   - config/urls.py api_v1: agregar path("<prefix>/", include("apps.<nueva_app>.urls"))
+2. read_project_file("apps/<app>/views.py") → verificar si el endpoint YA EXISTE en el código
+3. read_project_file("config/urls.py") → verificar si el app está REGISTRADO en api_v1
+4. Si no existe → write_project_file para cada archivo en apps/<nueva_app>/
+5. Si es app nueva → write_project_file también para config/settings/base.py (agregar "apps.<nueva_app>" a LOCAL_APPS) y config/urls.py (agregar path en api_v1)
+6. run_django_check → validar
 
-write_project_file: SOLO dentro de apps/. Para config/* mostrar en texto.
+write_project_file: permitido en apps/ Y config/. Úsalo para todos los archivos necesarios.
 Endpoints bajo: /api/v1/<prefix>/
-""".strip()
+
+CRÍTICO: Nunca digas que un endpoint "ya existe y funciona" sin verificar AMBAS condiciones:
+  a) El código existe en apps/<app>/views.py (usar read_project_file)
+  b) El app está registrado en config/urls.py (usar read_project_file)
+Si falta (b), usar write_project_file para agregar el path en config/urls.py.
+
+write_project_file: permitido en apps/ Y config/.
+Endpoints bajo: /api/v1/<prefix>/
+
+GENERACIÓN DE ENDPOINT CON IA (generate_endpoint — PREDETERMINADO para cualquier solicitud de nuevo endpoint):
+Cuando el usuario pida generar, crear, o hacer un endpoint nuevo, USA generate_endpoint POR DEFECTO.
+NO asumir que el endpoint ya existe. NO usar write_project_file para generar código nuevo.
+Pasos:
+1. Confirmar internamente: target_app (app Django destino) y tablas relevantes — si no están claros, preguntar antes
+2. Avisar que tarda ~1-2 min (modelo local generando) y que espere
+3. Llamar generate_endpoint con {user_request, target_app, tables_used}
+4. Al recibir el resultado, COPIAR TEXTUALMENTE el campo "generated_code" DEL TOOL RESULT — SIN RESUMIR, SIN OMITIR NADA.
+   REGLA CRÍTICA: el campo "generated_code" ya contiene los bloques de código formateados. Pégalo tal cual en tu respuesta.
+   NO digas "aquí está el código" y luego describas — MUESTRA el código completo.
+5. Al final agrega en una línea: "Audit ID: {id} | Para desplegar: POST {approve_url}"
+6. El chatbot NO despliega automáticamente — solo el admin aprueba vía API""".strip()
+
+# ---------------------------------------------------------------------------
+# Model — always Haiku; heavy code generation is offloaded to local Ollama model
+# ---------------------------------------------------------------------------
+
+_MODEL_HAIKU = "claude-haiku-4-5"
+
+
+def _pick_model(message: str) -> str:  # signature kept for compatibility
+    return _MODEL_HAIKU
 
 _MAX_TOOL_ROUNDS = 15  # More rounds needed for code generation (read → write → check)
 
@@ -107,6 +146,7 @@ def handle_message(message: str, history: list[dict], user) -> str:
         Claude's final text response.
     """
     client = _get_client()
+    model  = _pick_model(message)
 
     # Keep only the last 6 history turns (3 user+assistant pairs) to limit token growth.
     # Full history can carry 5-10K tokens of prior tool results that Claude doesn't need.
@@ -114,7 +154,7 @@ def handle_message(message: str, history: list[dict], user) -> str:
     messages: list[dict] = trimmed_history + [{"role": "user", "content": message}]
 
     for _ in range(_MAX_TOOL_ROUNDS):
-        response = _create_with_retry(client, messages)
+        response = _create_with_retry(client, messages, model)
 
         # Pure text response — done
         if response.stop_reason == "end_turn":
@@ -170,22 +210,26 @@ def _compress_old_tool_results(messages: list[dict], max_chars: int = 300) -> No
         messages[idx] = {**messages[idx], "content": compressed}
 
 
-def _create_with_retry(client: anthropic.Anthropic, messages: list[dict]):
-    """Call client.messages.create, re-raising RateLimitError as a user-friendly message."""
-    try:
-        return client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=4096,
-            system=_SYSTEM_PROMPT,
-            tools=tool_registry.TOOL_SCHEMAS,
-            messages=messages,
-        )
-    except anthropic.RateLimitError:
-        raise RuntimeError(
-            "Límite de tokens alcanzado (10 000 tokens/min). "
-            "Por favor espera 60 segundos e intenta de nuevo. "
-            "Si necesitas crear endpoints, considera dividir la tarea en pasos más pequeños."
-        )
+def _create_with_retry(client: anthropic.Anthropic, messages: list[dict], model: str = _MODEL_HAIKU):
+    """Call client.messages.create with one automatic retry on RateLimitError."""
+    for attempt in range(2):
+        try:
+            return client.messages.create(
+                model=model,
+                max_tokens=4096,
+                system=_SYSTEM_PROMPT,
+                tools=tool_registry.TOOL_SCHEMAS,
+                messages=messages,
+            )
+        except anthropic.RateLimitError:
+            if attempt == 0:
+                logger.warning("Claude rate limit hit — esperando 65s antes de reintentar...")
+                time.sleep(65)
+                continue
+            raise RuntimeError(
+                "Límite de tokens alcanzado. Se reintentó automáticamente pero el límite persiste. "
+                "Por favor espera 60 segundos e intenta de nuevo."
+            )
 
 
 def _execute_tool_calls(response, user) -> list[dict]:

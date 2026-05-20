@@ -15,6 +15,7 @@ from apps.inventory.serializers import (
     ArticleReadSerializer,
     ArticleUpdateSerializer,
     ArticleWriteSerializer,
+    CamerasBySiteSerializer,
     DashboardStatsSerializer,
     GroupSerializer,
 )
@@ -93,3 +94,12 @@ class DashboardStatsView(APIView):
     def get(self, request: Request) -> Response:
         stats = selectors.get_dashboard_stats()
         return Response(DashboardStatsSerializer(stats).data)
+
+
+class CamerasBySiteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int) -> Response:
+        cameras = selectors.get_cameras_by_site(site_id)
+        data = CamerasBySiteSerializer(cameras, many=True).data
+        return Response({"data": data, "total": len(data)})

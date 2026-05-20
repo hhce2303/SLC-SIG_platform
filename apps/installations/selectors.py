@@ -175,9 +175,107 @@ def list_sites() -> list[dict]:
         .order_by("name")
         .values(
             "id", "name", "city", "state_code", "country_code",
-            "cameras_count", "total_devices", "monitored",
+            "cameras_count", "total_devices", "monitored", "ip_address", "address",
         )
     )
+
+
+def list_sites_dashboard() -> list[dict]:
+    """
+    Enriched site list for the frontend dashboard.
+
+    For each site returns:
+    - status:       name of the latest installation's inst_status (null if no installation)
+    - responsable:  project_owner user name of the latest installation
+    - it_manager:   first IT responsible user name from it_installation_responsibles
+    - notes:        text of the most recent installation_note (latest created_at)
+    - log:          all installation_notes as [{date, action, user}] sorted oldest→newest
+
+    Two queries are used to avoid N+1:
+    1. Main SQL — sites + latest installation + status + responsable + it_manager
+    2. Notes SQL — all notes for the relevant installations in one batch
+    """
+    main_sql = """
+        SELECT
+            s.id,
+            s.name,
+            s.address,
+            s.city,
+            s.state_code,
+            s.customer_group_id,
+            ist.name   AS status,
+            u.name     AS responsable,
+            it_u.name  AS it_manager,
+            i.id       AS installation_id
+        FROM sites s
+        LEFT JOIN (
+            SELECT site_id, MAX(id) AS latest_id
+            FROM installations
+            WHERE deleted_at IS NULL
+            GROUP BY site_id
+        ) li ON s.id = li.site_id
+        LEFT JOIN installations i   ON i.id            = li.latest_id
+        LEFT JOIN inst_statuses ist ON i.inst_status_id = ist.id
+        LEFT JOIN users u           ON i.project_owner  = u.id
+        LEFT JOIN (
+            SELECT installation_id, MIN(user_id) AS user_id
+            FROM it_installation_responsibles
+            GROUP BY installation_id
+        ) itr ON itr.installation_id = i.id
+        LEFT JOIN users it_u ON it_u.id = itr.user_id
+        WHERE s.deleted_at IS NULL
+        ORDER BY s.name
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(main_sql)
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    inst_ids = [r["installation_id"] for r in rows if r["installation_id"] is not None]
+
+    notes_by_inst: dict[int, list[dict]] = defaultdict(list)
+    if inst_ids:
+        placeholders = ", ".join(["%s"] * len(inst_ids))
+        notes_sql = f"""
+            SELECT
+                n.installation_id,
+                n.note,
+                n.created_at,
+                u.name AS user_name
+            FROM installation_notes n
+            LEFT JOIN users u ON n.user_note_id = u.id
+            WHERE n.installation_id IN ({placeholders})
+            ORDER BY n.created_at ASC
+        """
+        with connections[_DB].cursor() as cur:
+            cur.execute(notes_sql, inst_ids)
+            note_cols = [c[0] for c in cur.description]
+            for note_row in [dict(zip(note_cols, r)) for r in cur.fetchall()]:
+                ts = note_row["created_at"]
+                notes_by_inst[note_row["installation_id"]].append({
+                    "date": ts.isoformat() if ts else None,
+                    "action": note_row["note"],
+                    "user": note_row["user_name"] or "Unknown",
+                })
+
+    result = []
+    for row in rows:
+        inst_id = row["installation_id"]
+        log_entries = notes_by_inst.get(inst_id, [])
+        location = ", ".join(filter(None, [row.get("city"), row.get("state_code")])) or None
+        result.append({
+            "id": row["id"],
+            "name": row["name"],
+            "status": row["status"] or None,
+            "address": row["address"] or None,
+            "location": location,
+            "responsable": row["responsable"] or None,
+            "it_manager": row["it_manager"] or None,
+            "notes": log_entries[-1]["action"] if log_entries else None,
+            "log": log_entries,
+            "customer_group_id": row["customer_group_id"],
+        })
+    return result
 
 
 def list_cameras(
@@ -262,6 +360,283 @@ def list_cameras(
 
 def get_site_or_404(site_id: int) -> Site | None:
     return Site.objects.using(_DB).filter(pk=site_id, deleted_at__isnull=True).first()
+
+
+def get_camera_model_catalog() -> list[dict]:
+    """
+    Flat list of every camera model registered in the company catalog.
+    NOT tied to any site or physical unit — used when building a new
+    installation and selecting which models to assign.
+
+    Shape is identical to get_site_camera_models so the frontend can
+    reuse the same TypeScript interface. serial and ip are always None
+    because these are model definitions, not physical units.
+    """
+    sql = """
+        SELECT
+            cm.id          AS model_id,
+            cm.name        AS name,
+            cb.Name        AS brand,
+            ct.name        AS subtype,
+            ct.description AS type_desc
+        FROM camera_models cm
+        JOIN camera_brands cb ON cm.camera_brand_id = cb.id
+        JOIN camera_types  ct ON cm.camera_type_id  = ct.id
+        ORDER BY ct.name, cb.Name, cm.name
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql)
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    return [
+        {
+            "id": f"cam-{row['model_id']}",
+            "name": row["name"],
+            "brand": (row["brand"] or "").upper(),
+            "serial": None,
+            "ip": None,
+            "resolution": None,
+            "type": row["type_desc"],
+            "category": "camera",
+            "subtype": (row["subtype"] or "").lower(),
+            "lensType": None,
+            "rango_lente_mm": None,
+            "rango_fov_grados": None,
+            "poe_watts": None,
+            "bandwidth_mbps": None,
+        }
+        for row in rows
+    ]
+
+
+def get_site_camera_models(site_id: int) -> list[dict]:
+    """
+    Returns one entry per individual camera installed at a given site.
+    Each camera is identified by its own DB id and serial number.
+    Fields with no DB column are returned as None so the frontend schema
+    stays intact.
+    """
+    sql = """
+        SELECT
+            c.id           AS camera_id,
+            c.serial       AS serial,
+            cm.name        AS name,
+            cb.Name        AS brand,
+            ct.name        AS subtype,
+            ct.description AS type_desc,
+            d.address      AS ip
+        FROM cameras c
+        JOIN camera_models cm  ON c.camera_model_id = cm.id
+        JOIN camera_brands cb  ON cm.camera_brand_id = cb.id
+        JOIN camera_types  ct  ON cm.camera_type_id  = ct.id
+        JOIN installations i   ON c.installation_id  = i.id
+        LEFT JOIN devices  d   ON c.device_id        = d.id
+        WHERE i.site_id = %s
+          AND i.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+        ORDER BY ct.name, cb.Name, cm.name, c.serial
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [int(site_id)])
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    return [
+        {
+            "id": f"cam-{row['camera_id']}",
+            "name": row["name"],
+            "brand": (row["brand"] or "").upper(),
+            "serial": row["serial"],
+            "ip": row["ip"] or None,
+            "resolution": None,
+            "type": row["type_desc"],
+            "category": "camera",
+            "subtype": (row["subtype"] or "").lower(),
+            "lensType": None,
+            "rango_lente_mm": None,
+            "rango_fov_grados": None,
+            "poe_watts": None,
+            "bandwidth_mbps": None,
+        }
+        for row in rows
+    ]
+
+
+def get_site_switch_models(site_id: int) -> list[dict]:
+    """
+    Returns distinct switch device-type entries installed at a given site
+    in the frontend catalog format.  Fields with no DB column are None.
+    Filters device_types.device_type = 'Switch' only.
+    """
+    sql = """
+        SELECT DISTINCT
+            dt.id    AS type_id,
+            dt.model AS name,
+            dt.brand AS brand
+        FROM other_devices od
+        JOIN device_types  dt ON od.device_type_id = dt.id
+        JOIN installations i  ON od.installation_id = i.id
+        WHERE i.site_id = %s
+          AND dt.device_type = 'Switch'
+          AND i.deleted_at IS NULL
+          AND od.deleted_at IS NULL
+        ORDER BY dt.brand, dt.model
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [int(site_id)])
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    return [
+        {
+            "id": f"switch-{row['type_id']}",
+            "name": row["name"],
+            "brand": row["brand"],
+            "resolution": "\u2014",
+            "type": None,
+            "category": "static",
+            "subtype": "switch",
+            "poe_watts": None,
+            "bandwidth_mbps": None,
+            "poe_budget_watts": None,
+            "uplink_mbps": None,
+        }
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Unified site device catalog
+# ---------------------------------------------------------------------------
+
+# Maps device_types.device_type → (category, subtype, id_prefix)
+_OTHER_DEVICE_MAP: dict[str, tuple[str, str, str]] = {
+    "Switch":         ("network",  "switch",         "switch"),
+    "Router":         ("network",  "router",         "router"),
+    "PDU":            ("power",    "pdu",            "pdu"),
+    "DA":             ("video",    "da",             "da"),
+    "RADIO":          ("wireless", "radio",          "radio"),
+    "Access Control": ("security", "access_control", "ac"),
+}
+
+
+def get_site_device_catalog(site_id: int) -> list[dict]:
+    """
+    Unified device catalog for a site.
+
+    Returns all cameras (one entry per physical unit) and all other devices
+    (one entry per physical unit from other_devices) in a single flat list
+    with a consistent shape.  All fields that don't apply to a given device
+    type are returned as None so the frontend interface stays stable.
+
+    Order: cameras first (sorted by subtype/brand/name), then other devices
+    sorted by device_type/brand/model.
+    """
+    return _get_site_cameras_for_catalog(site_id) + _get_site_other_devices_for_catalog(site_id)
+
+
+def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
+    sql = """
+        SELECT
+            c.id           AS camera_id,
+            c.serial       AS serial,
+            cm.name        AS name,
+            cb.Name        AS brand,
+            ct.name        AS subtype,
+            ct.description AS type_desc,
+            d.address      AS ip
+        FROM cameras c
+        JOIN camera_models cm  ON c.camera_model_id = cm.id
+        JOIN camera_brands cb  ON cm.camera_brand_id = cb.id
+        JOIN camera_types  ct  ON cm.camera_type_id  = ct.id
+        JOIN installations i   ON c.installation_id  = i.id
+        LEFT JOIN devices  d   ON c.device_id        = d.id
+        WHERE i.site_id = %s
+          AND i.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+        ORDER BY ct.name, cb.Name, cm.name, c.serial
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [int(site_id)])
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    return [
+        {
+            "id": f"cam-{row['camera_id']}",
+            "name": row["name"],
+            "brand": (row["brand"] or "").upper(),
+            "serial": row["serial"] or None,
+            "ip": row["ip"] or None,
+            "resolution": None,
+            "type": row["type_desc"] or None,
+            "category": "camera",
+            "subtype": (row["subtype"] or "").lower(),
+            "lensType": None,
+            "rango_lente_mm": None,
+            "rango_fov_grados": None,
+            "poe_watts": None,
+            "bandwidth_mbps": None,
+            "poe_budget_watts": None,
+            "uplink_mbps": None,
+        }
+        for row in rows
+    ]
+
+
+def _get_site_other_devices_for_catalog(site_id: int) -> list[dict]:
+    sql = """
+        SELECT
+            od.id          AS device_id,
+            od.serial      AS serial,
+            dt.model       AS name,
+            dt.brand       AS brand,
+            dt.device_type AS device_type,
+            d.address      AS ip
+        FROM other_devices od
+        JOIN device_types  dt ON od.device_type_id  = dt.id
+        JOIN installations i  ON od.installation_id = i.id
+        LEFT JOIN devices  d  ON od.device_id       = d.id
+        WHERE i.site_id = %s
+          AND i.deleted_at IS NULL
+          AND od.deleted_at IS NULL
+        ORDER BY dt.device_type, dt.brand, dt.model, od.serial
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [int(site_id)])
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    result = []
+    for row in rows:
+        mapping = _OTHER_DEVICE_MAP.get(row["device_type"])
+        if mapping is None:
+            category = "device"
+            subtype = (row["device_type"] or "unknown").lower().replace(" ", "_")
+            id_prefix = "device"
+        else:
+            category, subtype, id_prefix = mapping
+
+        result.append({
+            "id": f"{id_prefix}-{row['device_id']}",
+            "name": row["name"],
+            "brand": (row["brand"] or "").title(),
+            "serial": row["serial"] or None,
+            "ip": row["ip"] or None,
+            "resolution": None,
+            "type": None,
+            "category": category,
+            "subtype": subtype,
+            "lensType": None,
+            "rango_lente_mm": None,
+            "rango_fov_grados": None,
+            "poe_watts": None,
+            "bandwidth_mbps": None,
+            "poe_budget_watts": None,
+            "uplink_mbps": None,
+        })
+    return result
 
 
 def get_site_status(site_id: int) -> list[dict]:

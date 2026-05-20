@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .serializers import ChatMessageSerializer
 from . import services
@@ -20,9 +21,9 @@ class ChatbotMessageView(APIView):
     Returns Claude's text reply after tool resolution.
     Requires authenticated admin user.
     """
-    # SessionAuthentication allows Django admin session cookies from the dashboard.
-    # Placed first so the admin panel works without a JWT or sig_token.
-    authentication_classes = [SessionAuthentication]
+    # SessionAuthentication: Django admin session cookies from the dashboard.
+    # JWTAuthentication: API clients (PowerShell, curl, etc.) with Bearer token.
+    authentication_classes = [SessionAuthentication, JWTAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request):

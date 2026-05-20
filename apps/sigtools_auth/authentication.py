@@ -16,12 +16,16 @@ This means DailyLog JWT endpoints are completely unaffected.
 """
 from __future__ import annotations
 
+import logging
+
 from django.conf import settings
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 from apps.sigtools_auth import token_utils
 from apps.sigtools_auth.models import PersonalAccessToken
+
+logger = logging.getLogger(__name__)
 
 COOKIE_NAME = getattr(settings, "SIGTOOLS_COOKIE_NAME", "sig_token")
 
@@ -75,6 +79,16 @@ class SigtoolsCookieAuthentication(BaseAuthentication):
     """
 
     def authenticate(self, request):
+        # DEBUG: log what auth tokens are present
+        has_cookie = COOKIE_NAME in request.COOKIES
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        logger.warning(
+            "SigtoolsAuth: path=%s has_cookie=%s auth_header_prefix=%r",
+            request.path,
+            has_cookie,
+            auth_header[:20] if auth_header else "",
+        )
+
         # Source 1: HttpOnly cookie (browser)
         client_token = request.COOKIES.get(COOKIE_NAME)
 
@@ -82,7 +96,11 @@ class SigtoolsCookieAuthentication(BaseAuthentication):
         if not client_token:
             auth_header = request.META.get("HTTP_AUTHORIZATION", "")
             if auth_header.startswith("Bearer "):
-                client_token = auth_header[7:].strip()
+                bearer = auth_header[7:].strip()
+                # JWTs have exactly 3 dot-separated segments — let JWTAuthentication handle them
+                if bearer.count(".") == 2:
+                    return None
+                client_token = bearer
 
         if not client_token:
             return None  # No token → try next authenticator

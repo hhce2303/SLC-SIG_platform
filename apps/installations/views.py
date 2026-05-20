@@ -35,6 +35,13 @@ from apps.installations.serializers import (
     SigProjectSerializer,
     SigProjectUpdateSerializer,
     SimpleDropdownSerializer,
+    SiteCameraModelSerializer,
+    SiteDashboardItemSerializer,
+    SiteDeviceCatalogItemSerializer,
+    SiteListItemSerializer,
+    SiteOnboardingResponseSerializer,
+    SiteOnboardingSerializer,
+    SiteSwitchModelSerializer,
     SiteCreateSerializer,
     SiteCreateResponseSerializer,
     SiteStatusEntrySerializer,
@@ -47,6 +54,16 @@ from apps.installations.serializers import (
 # ---------------------------------------------------------------------------
 # Catalog
 # ---------------------------------------------------------------------------
+
+class CameraModelCatalogView(APIView):
+    """GET /catalog/camera-models/ — all camera models in the company catalog."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: SiteCameraModelSerializer(many=True)})
+    def get(self, request: Request) -> Response:
+        data = selectors.get_camera_model_catalog()
+        return Response(data, status=status.HTTP_200_OK)
+
 
 class CameraCatalogView(APIView):
     permission_classes = [IsAuthenticated]
@@ -63,6 +80,48 @@ class DeviceCatalogView(APIView):
     @extend_schema(responses={200: DeviceTypeSerializer(many=True)})
     def get(self, request: Request) -> Response:
         data = selectors.get_device_types()
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class SiteCameraCatalogView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: SiteCameraModelSerializer(many=True)})
+    def get(self, request: Request, site_id: int) -> Response:
+        cameras = selectors.get_site_camera_models(site_id)
+        return Response(cameras, status=status.HTTP_200_OK)
+
+
+class SiteSwitchCatalogView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: SiteSwitchModelSerializer(many=True)})
+    def get(self, request: Request, site_id: int) -> Response:
+        switches = selectors.get_site_switch_models(site_id)
+        return Response(switches, status=status.HTTP_200_OK)
+
+
+class SiteDeviceCatalogView(APIView):
+    """
+    GET /sites/<site_id>/catalog/
+
+    Unified device catalog for a site.  Returns all physical devices installed
+    at the site in a single flat list:
+      - cameras      → category="camera",   subtype=camera_type (bullet, dome, ptz, ...)
+      - switches     → category="network",  subtype="switch"
+      - routers      → category="network",  subtype="router"
+      - PDUs         → category="power",    subtype="pdu"
+      - DAs          → category="video",    subtype="da"
+      - radios       → category="wireless", subtype="radio"
+      - access ctrl  → category="security", subtype="access_control"
+
+    Each entry uses the same shape; fields that don't apply to a device type are null.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: SiteDeviceCatalogItemSerializer(many=True)})
+    def get(self, request: Request, site_id: int) -> Response:
+        data = selectors.get_site_device_catalog(site_id)
         return Response(data, status=status.HTTP_200_OK)
 
 
@@ -114,12 +173,39 @@ class UsersView(APIView):
 class SiteListView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses={200: SiteDashboardItemSerializer(many=True)})
+    def get(self, request: Request) -> Response:
+        data = selectors.list_sites_dashboard()
+        return Response(data, status=status.HTTP_200_OK)
+
     @extend_schema(request=SiteCreateSerializer, responses={201: SiteCreateResponseSerializer})
     def post(self, request: Request) -> Response:
         serializer = SiteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         site_id = services.create_site(serializer.validated_data)
         return Response({"site_id": site_id}, status=status.HTTP_201_CREATED)
+
+
+class SiteOnboardingView(APIView):
+    """
+    POST /onboarding/
+    Creates a site and its first installation in a single atomic transaction.
+    Returns the full installation record upon success.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=SiteOnboardingSerializer,
+        responses={201: SiteOnboardingResponseSerializer},
+    )
+    def post(self, request: Request) -> Response:
+        serializer = SiteOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            installation = services.create_site_with_installation(serializer.validated_data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(installation, status=status.HTTP_201_CREATED)
 
 
 class SiteStatusView(APIView):

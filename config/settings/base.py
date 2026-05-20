@@ -54,6 +54,9 @@ LOCAL_APPS = [
     "apps.installations",
     "apps.sigtools_auth",
     "apps.chatbot",
+    "apps.codegen",
+    "apps.layers",
+    "apps.test",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -176,7 +179,7 @@ DATABASES = {
 
 DATABASE_ROUTERS = [
     "config.db_router.SchedulesRouter",
-    "config.db_router.InventoryRouter",
+    # "config.db_router.InventoryRouter",  # uncomment when inventory gets its own DB
     "config.db_router.SigtoolsRouter",
 ]
 
