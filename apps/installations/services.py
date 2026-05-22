@@ -796,3 +796,78 @@ def delete_admin_role(role_id: str) -> bool | str:
             cur.execute("DELETE FROM app_roles WHERE id = %s", [role_id])
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# Dispatch / Receipt / Installation services (sig_dailylogs — default DB)
+# ---------------------------------------------------------------------------
+
+from django.utils import timezone as _tz  # noqa: E402
+
+from apps.installations.models import SiteDeviceDispatch, SiteDeviceLog  # noqa: E402
+
+
+def upsert_device_dispatch(
+    site_id: int, device_id: str, **fields
+) -> SiteDeviceDispatch:
+    dispatch, _ = SiteDeviceDispatch.objects.update_or_create(
+        site_id=site_id,
+        device_id=device_id,
+        defaults=fields,
+    )
+    return dispatch
+
+
+def confirm_device_receipt(
+    site_id: int,
+    device_id: str,
+    qty_received: int,
+    receipt_notes: str,
+    receipt_photo_url: str,
+) -> SiteDeviceDispatch:
+    dispatch, _ = SiteDeviceDispatch.objects.update_or_create(
+        site_id=site_id,
+        device_id=device_id,
+        defaults={
+            "qty_received":      qty_received,
+            "received_at":       _tz.now(),
+            "receipt_notes":     receipt_notes,
+            "receipt_photo_url": receipt_photo_url,
+        },
+    )
+    return dispatch
+
+
+def mark_device_installed(
+    site_id: int,
+    device_id: str,
+    install_notes: str,
+    install_photo_url: str,
+) -> SiteDeviceDispatch:
+    dispatch, _ = SiteDeviceDispatch.objects.update_or_create(
+        site_id=site_id,
+        device_id=device_id,
+        defaults={
+            "installed":         True,
+            "installed_at":      _tz.now(),
+            "install_notes":     install_notes,
+            "install_photo_url": install_photo_url,
+        },
+    )
+    return dispatch
+
+
+def log_device_activity(
+    site_id: int,
+    device_id: str,
+    action: str,
+    user_id: int | None,
+    notes: str = "",
+) -> SiteDeviceLog:
+    return SiteDeviceLog.objects.create(
+        site_id=site_id,
+        device_id=device_id,
+        action=action,
+        user_id=user_id,
+        notes=notes,
+    )

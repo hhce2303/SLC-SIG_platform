@@ -55,4 +55,14 @@ urlpatterns = [
     path("admin/roles/", views.AdminRolesView.as_view(), name="admin-roles"),
     path("admin/roles/<uuid:role_id>/", views.AdminRoleDetailView.as_view(), name="admin-role-detail"),
     path("admin/permissions/", views.AdminPermissionsView.as_view(), name="admin-permissions"),
+
+    # --- Dispatch / Receipt / Installation ---
+    path("sites/<int:site_id>/catalog/<str:device_id>/",         views.SiteDeviceDispatchView.as_view(),  name="site-device-dispatch"),
+    path("sites/<int:site_id>/catalog/<str:device_id>/receive/", views.SiteDeviceReceiveView.as_view(),   name="site-device-receive"),
+    path("sites/<int:site_id>/catalog/<str:device_id>/install/", views.SiteDeviceInstallView.as_view(),   name="site-device-install"),
+    path("sites/<int:site_id>/catalog/<str:device_id>/logs/",    views.SiteDeviceLogsView.as_view(),      name="site-device-logs"),
+    path("sites/<int:site_id>/progress/",                        views.SiteProgressView.as_view(),        name="site-progress"),
+
+    # --- Real-time SSE ---
+    path("stream/", views.InstallationsSSEView.as_view(), name="installations-sse-stream"),
 ]

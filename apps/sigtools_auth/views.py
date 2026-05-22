@@ -97,13 +97,20 @@ class WebMeView(APIView):
 
     @extend_schema(responses={200: SigtoolsUserSerializer}, tags=["web-auth"])
     def get(self, request: Request) -> Response:
-        # request.user is a SigtoolsWebUser (set by SigtoolsCookieAuthentication)
         sig_user = request.user.sigtools_user
+        from apps.installations.selectors import get_user_app_permissions, get_user_app_roles
+        try:
+            roles       = get_user_app_roles(sig_user.pk)
+            permissions = get_user_app_permissions(sig_user.pk)
+        except Exception:
+            roles, permissions = [], []
         data = {
-            "id": sig_user.pk,
-            "name": sig_user.name,
-            "email": sig_user.email,
-            "username": sig_user.username,
+            "id":          sig_user.pk,
+            "name":        sig_user.name,
+            "email":       sig_user.email,
+            "username":    sig_user.username,
+            "roles":       roles,
+            "permissions": permissions,
         }
         return Response(data, status=status.HTTP_200_OK)
 

@@ -159,6 +159,18 @@ class SiteDeviceCatalogItemSerializer(serializers.Serializer):
     bandwidth_mbps = serializers.FloatField(allow_null=True)
     poe_budget_watts = serializers.FloatField(allow_null=True)
     uplink_mbps = serializers.FloatField(allow_null=True)
+    # Dispatch overlay fields (null when no dispatch record exists)
+    vendor            = serializers.CharField(allow_null=True, allow_blank=True)
+    qty_sent          = serializers.IntegerField(allow_null=True)
+    tracking          = serializers.CharField(allow_null=True, allow_blank=True)
+    observations      = serializers.CharField(allow_null=True, allow_blank=True)
+    dispatched_at     = serializers.DateTimeField(allow_null=True)
+    qty_received      = serializers.IntegerField(allow_null=True)
+    received_at       = serializers.DateTimeField(allow_null=True)
+    receipt_photo_url = serializers.CharField(allow_null=True, allow_blank=True)
+    installed         = serializers.BooleanField(default=False)
+    installed_at      = serializers.DateTimeField(allow_null=True)
+    install_photo_url = serializers.CharField(allow_null=True, allow_blank=True)
 
 
 # ---------------------------------------------------------------------------
@@ -446,3 +458,80 @@ class AdminRoleUpdateSerializer(serializers.Serializer):
         if not attrs:
             raise serializers.ValidationError("At least one field must be provided.")
         return attrs
+
+
+# ---------------------------------------------------------------------------
+# Dispatch / Receipt / Installation serializers
+# ---------------------------------------------------------------------------
+
+class SiteDeviceDispatchSerializer(serializers.Serializer):
+    id                = serializers.IntegerField(read_only=True)
+    site_id           = serializers.IntegerField()
+    device_id         = serializers.CharField()
+    vendor            = serializers.CharField(allow_blank=True)
+    qty_sent          = serializers.IntegerField(allow_null=True)
+    tracking          = serializers.CharField(allow_blank=True)
+    observations      = serializers.CharField(allow_blank=True)
+    dispatched_at     = serializers.DateTimeField(allow_null=True)
+    qty_received      = serializers.IntegerField(allow_null=True)
+    received_at       = serializers.DateTimeField(allow_null=True)
+    receipt_notes     = serializers.CharField(allow_blank=True)
+    receipt_photo_url = serializers.CharField(allow_blank=True)
+    installed         = serializers.BooleanField()
+    installed_at      = serializers.DateTimeField(allow_null=True)
+    install_notes     = serializers.CharField(allow_blank=True)
+    install_photo_url = serializers.CharField(allow_blank=True)
+    updated_at        = serializers.DateTimeField(read_only=True)
+
+
+class SiteDeviceDispatchWriteSerializer(serializers.Serializer):
+    vendor        = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    quantity_send = serializers.IntegerField(allow_null=True, required=False)  # frontend name
+    tracking      = serializers.CharField(max_length=500, allow_blank=True, required=False)
+    observations  = serializers.CharField(allow_blank=True, required=False)
+    dispatched_at = serializers.DateTimeField(allow_null=True, required=False)
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("At least one field must be provided.")
+        # Map frontend name to model field name
+        if 'quantity_send' in attrs:
+            attrs['qty_sent'] = attrs.pop('quantity_send')
+        return attrs
+
+
+class SiteDeviceReceiveSerializer(serializers.Serializer):
+    qty_received      = serializers.IntegerField(min_value=0)
+    receipt_notes     = serializers.CharField(allow_blank=True, default="")
+    receipt_photo_url = serializers.CharField(allow_blank=True, default="")
+
+
+class SiteDeviceInstallSerializer(serializers.Serializer):
+    install_notes     = serializers.CharField(allow_blank=True, default="")
+    install_photo_url = serializers.CharField(allow_blank=True, default="")
+
+
+class SiteDeviceLogSerializer(serializers.Serializer):
+    id         = serializers.IntegerField(read_only=True)
+    site_id    = serializers.IntegerField()
+    device_id  = serializers.CharField()
+    action     = serializers.CharField()
+    user_id    = serializers.IntegerField(allow_null=True)
+    notes      = serializers.CharField(allow_blank=True)
+    created_at = serializers.DateTimeField(read_only=True)
+
+
+class SiteDeviceLogWriteSerializer(serializers.Serializer):
+    action  = serializers.CharField(max_length=100)
+    notes   = serializers.CharField(allow_blank=True, default="")
+    user_id = serializers.IntegerField(allow_null=True, required=False)
+
+
+class SiteProgressSerializer(serializers.Serializer):
+    total         = serializers.IntegerField()
+    dispatched    = serializers.IntegerField()
+    received      = serializers.IntegerField()
+    installed     = serializers.IntegerField()
+    pct_dispatched = serializers.FloatField()
+    pct_received   = serializers.FloatField()
+    pct_installed  = serializers.FloatField()

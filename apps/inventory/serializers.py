@@ -30,6 +30,10 @@ class ArticleReadSerializer(serializers.ModelSerializer):
     modifiedBy = serializers.CharField(source="modified_by")
     latestNote = serializers.CharField(source="latest_note")
     lastMod = serializers.DateTimeField(source="updated_at", format="%Y-%m-%dT%H:%M:%S")
+    quantitySend = serializers.IntegerField(source="quantity_send", allow_null=True)
+    checklistReceived = serializers.NullBooleanField(source="checklist_received")
+    checklistNotes = serializers.CharField(source="checklist_notes")
+    checklistDate = serializers.DateTimeField(source="checklist_date", allow_null=True)
 
     class Meta:
         model = Article
@@ -48,6 +52,15 @@ class ArticleReadSerializer(serializers.ModelSerializer):
             "modifiedBy",
             "latestNote",
             "lastMod",
+            # dispatch fields
+            "vendor",
+            "quantitySend",
+            "tracking",
+            "observations",
+            # checklist fields
+            "checklistReceived",
+            "checklistNotes",
+            "checklistDate",
         )
 
 
@@ -64,6 +77,15 @@ class ArticleWriteSerializer(serializers.Serializer):
     serial = serializers.CharField(required=False, allow_blank=True, default="")
     modified_by = serializers.CharField(required=False, allow_blank=True, default="")
     latest_note = serializers.CharField(required=False, allow_blank=True, default="")
+    # dispatch fields
+    vendor        = serializers.CharField(required=False, allow_blank=True, default="")
+    quantity_send = serializers.IntegerField(required=False, allow_null=True, default=None)
+    tracking      = serializers.CharField(required=False, allow_blank=True, default="")
+    observations  = serializers.CharField(required=False, allow_blank=True, default="")
+    # checklist fields
+    checklist_received = serializers.NullBooleanField(required=False, default=None)
+    checklist_notes    = serializers.CharField(required=False, allow_blank=True, default="")
+    checklist_date     = serializers.DateTimeField(required=False, allow_null=True, default=None)
 
 
 class ArticleUpdateSerializer(serializers.Serializer):
@@ -79,6 +101,15 @@ class ArticleUpdateSerializer(serializers.Serializer):
     serial = serializers.CharField(required=False, allow_blank=True)
     modified_by = serializers.CharField(required=False, allow_blank=True)
     latest_note = serializers.CharField(required=False, allow_blank=True)
+    # dispatch fields
+    vendor        = serializers.CharField(required=False, allow_blank=True)
+    quantity_send = serializers.IntegerField(required=False, allow_null=True)
+    tracking      = serializers.CharField(required=False, allow_blank=True)
+    observations  = serializers.CharField(required=False, allow_blank=True)
+    # checklist fields
+    checklist_received = serializers.NullBooleanField(required=False)
+    checklist_notes    = serializers.CharField(required=False, allow_blank=True)
+    checklist_date     = serializers.DateTimeField(required=False, allow_null=True)
 
 
 # ---------------------------------------------------------------------------

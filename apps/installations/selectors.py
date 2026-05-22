@@ -1067,3 +1067,71 @@ def fetch_admin_role(role_id: str) -> dict | None:
         d["permissions"] = [p for p in d["permissions"] if p is not None]
     d["user_count"] = int(d["user_count"])
     return d
+
+
+# ---------------------------------------------------------------------------
+# Dispatch / Receipt / Installation selectors (sig_dailylogs — default DB)
+# ---------------------------------------------------------------------------
+
+from django.db.models import QuerySet  # noqa: E402
+
+from apps.installations.models import SiteDeviceDispatch, SiteDeviceLog  # noqa: E402
+
+
+def get_device_dispatch(site_id: int, device_id: str) -> SiteDeviceDispatch | None:
+    try:
+        return SiteDeviceDispatch.objects.get(site_id=site_id, device_id=device_id)
+    except SiteDeviceDispatch.DoesNotExist:
+        return None
+
+
+def get_site_dispatch_all(site_id: int) -> QuerySet[SiteDeviceDispatch]:
+    return SiteDeviceDispatch.objects.filter(site_id=site_id)
+
+
+def get_device_logs(site_id: int, device_id: str) -> QuerySet[SiteDeviceLog]:
+    return SiteDeviceLog.objects.filter(site_id=site_id, device_id=device_id)
+
+
+def get_site_progress(site_id: int, total_devices: int) -> dict:
+    qs = SiteDeviceDispatch.objects.filter(site_id=site_id)
+    dispatched = qs.filter(qty_sent__gt=0).count()
+    received   = qs.filter(qty_received__gt=0).count()
+    installed  = qs.filter(installed=True).count()
+    denom = total_devices or 1
+    return {
+        "total":         total_devices,
+        "dispatched":    dispatched,
+        "received":      received,
+        "installed":     installed,
+        "pct_dispatched": round(dispatched / denom * 100, 1),
+        "pct_received":   round(received   / denom * 100, 1),
+        "pct_installed":  round(installed  / denom * 100, 1),
+    }
+
+
+def get_user_app_permissions(user_id: int) -> list[str]:
+    """Return flat list of permission keys for a user via sigtools_beta raw SQL."""
+    sql = """
+        SELECT DISTINCT p.key
+        FROM user_app_roles uar
+        JOIN role_permissions rp ON rp.role_id = uar.role_id
+        JOIN permissions p       ON p.id = rp.permission_id
+        WHERE uar.user_id = %s
+    """
+    with connections[_SIGTOOLS].cursor() as cur:
+        cur.execute(sql, [user_id])
+        return [row[0] for row in cur.fetchall()]
+
+
+def get_user_app_roles(user_id: int) -> list[str]:
+    """Return list of role names assigned to a user via sigtools_beta raw SQL."""
+    sql = """
+        SELECT ar.name
+        FROM user_app_roles uar
+        JOIN app_roles ar ON ar.id = uar.role_id
+        WHERE uar.user_id = %s
+    """
+    with connections[_SIGTOOLS].cursor() as cur:
+        cur.execute(sql, [user_id])
+        return [row[0] for row in cur.fetchall()]

@@ -7,6 +7,7 @@ from apps.inventory.views import (
     CamerasBySiteView,
     DashboardStatsView,
     GroupListView,
+    InventorySSEView,
 )
 
 urlpatterns = [
@@ -16,4 +17,5 @@ urlpatterns = [
     path("activity-logs/", ActivityLogListCreateView.as_view(), name="inventory-activity-logs"),
     path("dashboard/stats/", DashboardStatsView.as_view(), name="inventory-dashboard-stats"),
     path("cameras/by-site/<int:site_id>/", CamerasBySiteView.as_view(), name="inventory-cameras-by-site"),
+    path("stream/", InventorySSEView.as_view(), name="inventory-sse-stream"),
 ]

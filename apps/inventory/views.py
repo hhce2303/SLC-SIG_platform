@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import time
+
+from django.http import StreamingHttpResponse
+from django.utils import timezone
+from django.views import View
+
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -103,3 +110,39 @@ class CamerasBySiteView(APIView):
         cameras = selectors.get_cameras_by_site(site_id)
         data = CamerasBySiteSerializer(cameras, many=True).data
         return Response({"data": data, "total": len(data)})
+
+
+class InventorySSEView(View):
+    """
+    Server-Sent Events stream for real-time inventory updates.
+    Polls DB every 5 s and pushes changed articles/groups/companies to all
+    connected clients.  No django-channels required.
+    """
+
+    POLL_INTERVAL = 5  # seconds between DB checks
+
+    def get(self, request):
+        def event_stream():
+            last_check = timezone.now()
+            # Send an initial heartbeat so the connection is confirmed
+            yield "event: connected\ndata: {}\n\n"
+
+            while True:
+                time.sleep(self.POLL_INTERVAL)
+                now = timezone.now()
+
+                # Changed articles
+                changed = selectors.get_articles_updated_since(last_check)
+                if changed.exists():
+                    payload = ArticleReadSerializer(changed, many=True).data
+                    yield f"event: articles_updated\ndata: {json.dumps(payload)}\n\n"
+
+                last_check = now
+
+                # Heartbeat keeps connection alive through proxies
+                yield ": heartbeat\n\n"
+
+        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response

@@ -4,6 +4,13 @@ No business logic here; delegates to selectors (reads) and services (writes).
 """
 from __future__ import annotations
 
+import json
+import time
+
+from django.http import StreamingHttpResponse
+from django.utils import timezone
+from django.views import View
+
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -38,9 +45,16 @@ from apps.installations.serializers import (
     SiteCameraModelSerializer,
     SiteDashboardItemSerializer,
     SiteDeviceCatalogItemSerializer,
+    SiteDeviceDispatchSerializer,
+    SiteDeviceDispatchWriteSerializer,
+    SiteDeviceInstallSerializer,
+    SiteDeviceLogSerializer,
+    SiteDeviceLogWriteSerializer,
+    SiteDeviceReceiveSerializer,
     SiteListItemSerializer,
     SiteOnboardingResponseSerializer,
     SiteOnboardingSerializer,
+    SiteProgressSerializer,
     SiteSwitchModelSerializer,
     SiteCreateSerializer,
     SiteCreateResponseSerializer,
@@ -122,6 +136,24 @@ class SiteDeviceCatalogView(APIView):
     @extend_schema(responses={200: SiteDeviceCatalogItemSerializer(many=True)})
     def get(self, request: Request, site_id: int) -> Response:
         data = selectors.get_site_device_catalog(site_id)
+        # Merge dispatch overlay data into each catalog item
+        dispatch_map = {
+            d.device_id: d
+            for d in selectors.get_site_dispatch_all(site_id)
+        }
+        for item in data:
+            d = dispatch_map.get(item["id"])
+            item["vendor"]            = d.vendor if d else None
+            item["quantity_send"]     = d.qty_sent if d else None
+            item["tracking"]          = d.tracking if d else None
+            item["observations"]      = d.observations if d else None
+            item["dispatched_at"]     = d.dispatched_at.isoformat() if d and d.dispatched_at else None
+            item["qty_received"]      = d.qty_received if d else None
+            item["received_at"]       = d.received_at.isoformat() if d and d.received_at else None
+            item["receipt_photo_url"] = d.receipt_photo_url if d else None
+            item["installed"]         = d.installed if d else False
+            item["installed_at"]      = d.installed_at.isoformat() if d and d.installed_at else None
+            item["install_photo_url"] = d.install_photo_url if d else None
         return Response(data, status=status.HTTP_200_OK)
 
 
@@ -618,3 +650,142 @@ class AdminPermissionsView(APIView):
     @extend_schema(responses={200: AdminPermissionSerializer(many=True)})
     def get(self, request: Request) -> Response:
         return Response(selectors.list_admin_permissions(), status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch / Receipt / Installation views
+# ---------------------------------------------------------------------------
+
+class SiteDeviceDispatchView(APIView):
+    """PATCH /sites/<site_id>/catalog/<device_id>/ — upsert dispatch fields."""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request: Request, site_id: int, device_id: str) -> Response:
+        ser = SiteDeviceDispatchWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        dispatch = services.upsert_device_dispatch(site_id, device_id, **ser.validated_data)
+        services.log_device_activity(
+            site_id, device_id, "dispatch_updated",
+            getattr(request.user, "id", None),
+            f"Dispatch info updated: qty_sent={dispatch.qty_sent}",
+        )
+        return Response(SiteDeviceDispatchSerializer(dispatch).data, status=status.HTTP_200_OK)
+
+
+class SiteDeviceReceiveView(APIView):
+    """POST /sites/<site_id>/catalog/<device_id>/receive/ — confirm receipt."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request, site_id: int, device_id: str) -> Response:
+        ser = SiteDeviceReceiveSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        d = ser.validated_data
+        dispatch = services.confirm_device_receipt(
+            site_id, device_id,
+            qty_received=d["qty_received"],
+            receipt_notes=d.get("receipt_notes", ""),
+            receipt_photo_url=d.get("receipt_photo_url", ""),
+        )
+        services.log_device_activity(
+            site_id, device_id, "receipt_confirmed",
+            getattr(request.user, "id", None),
+            f"Received {dispatch.qty_received} units",
+        )
+        return Response(SiteDeviceDispatchSerializer(dispatch).data, status=status.HTTP_200_OK)
+
+
+class SiteDeviceInstallView(APIView):
+    """POST /sites/<site_id>/catalog/<device_id>/install/ — mark as installed."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request, site_id: int, device_id: str) -> Response:
+        ser = SiteDeviceInstallSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        d = ser.validated_data
+        dispatch = services.mark_device_installed(
+            site_id, device_id,
+            install_notes=d.get("install_notes", ""),
+            install_photo_url=d.get("install_photo_url", ""),
+        )
+        services.log_device_activity(
+            site_id, device_id, "device_installed",
+            getattr(request.user, "id", None),
+            d.get("install_notes", ""),
+        )
+        return Response(SiteDeviceDispatchSerializer(dispatch).data, status=status.HTTP_200_OK)
+
+
+class SiteDeviceLogsView(APIView):
+    """GET/POST /sites/<site_id>/catalog/<device_id>/logs/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int, device_id: str) -> Response:
+        logs = selectors.get_device_logs(site_id, device_id)
+        data = SiteDeviceLogSerializer(logs, many=True).data
+        return Response({"data": data, "total": len(data)}, status=status.HTTP_200_OK)
+
+    def post(self, request: Request, site_id: int, device_id: str) -> Response:
+        ser = SiteDeviceLogWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        log = services.log_device_activity(
+            site_id, device_id,
+            action=ser.validated_data["action"],
+            user_id=ser.validated_data.get("user_id") or getattr(request.user, "id", None),
+            notes=ser.validated_data.get("notes", ""),
+        )
+        return Response(SiteDeviceLogSerializer(log).data, status=status.HTTP_201_CREATED)
+
+
+class SiteProgressView(APIView):
+    """GET /sites/<site_id>/progress/ — dispatched/received/installed counts."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int) -> Response:
+        catalog = selectors.get_site_device_catalog(site_id)
+        total = len(catalog)
+        data = selectors.get_site_progress(site_id, total)
+        return Response(SiteProgressSerializer(data).data, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# SSE stream for real-time installation updates
+# ---------------------------------------------------------------------------
+
+class InstallationsSSEView(View):
+    """
+    GET /api/v1/installations/stream/
+    Server-Sent Events: emits dispatch_updated events whenever a
+    SiteDeviceDispatch record changes.
+    """
+
+    POLL_INTERVAL = 5
+
+    def get(self, request):
+        from apps.installations.models import SiteDeviceDispatch
+
+        def event_stream():
+            last_check = timezone.now()
+            yield "event: connected\ndata: {}\n\n"
+            while True:
+                time.sleep(self.POLL_INTERVAL)
+                now = timezone.now()
+                changed = SiteDeviceDispatch.objects.filter(updated_at__gt=last_check)
+                if changed.exists():
+                    payload = [
+                        {
+                            "site_id":   d.site_id,
+                            "device_id": d.device_id,
+                            "installed": d.installed,
+                            "qty_received": d.qty_received,
+                            "qty_sent":  d.qty_sent,
+                        }
+                        for d in changed
+                    ]
+                    yield f"event: dispatch_updated\ndata: {json.dumps(payload)}\n\n"
+                last_check = now
+                yield ": heartbeat\n\n"
+
+        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response

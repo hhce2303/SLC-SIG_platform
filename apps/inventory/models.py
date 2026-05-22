@@ -8,6 +8,8 @@ class ArticleStatus(models.TextChoices):
     REPARADO = "reparado", "Reparado"
     REPARACION = "reparacion", "En reparación"
     DANADO = "danado", "Dañado"
+    COTIZACION = "cotizacion", "En Cotización"
+    INSTALACION = "instalacion", "En Instalación"
 
 
 class ArticleCategory(models.TextChoices):
@@ -54,6 +56,18 @@ class Article(models.Model):
     serial = models.CharField(max_length=200, blank=True, default="")
     modified_by = models.CharField(max_length=100, blank=True, default="")
     latest_note = models.TextField(blank=True, default="")
+
+    # Dispatch / shipping info
+    vendor        = models.CharField(max_length=255, blank=True, default="")
+    quantity_send = models.IntegerField(null=True, blank=True)
+    tracking      = models.CharField(max_length=500, blank=True, default="")
+    observations  = models.TextField(blank=True, default="")
+
+    # Technician receipt checklist
+    checklist_received = models.BooleanField(null=True, blank=True)
+    checklist_notes    = models.TextField(blank=True, default="")
+    checklist_date     = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
