@@ -2,7 +2,7 @@
 # Copia los archivos de apps/ del contenedor → local
 # Usar ANTES de docker compose up --build para no perder cambios del chatbot
 
-$container = "daily-log-backend"
+$container = "SIGplatform-web"
 $base      = $PSScriptRoot
 
 Write-Host "Sincronizando apps/ del contenedor al local..." -ForegroundColor Cyan

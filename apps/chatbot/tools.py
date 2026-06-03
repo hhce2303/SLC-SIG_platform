@@ -382,7 +382,7 @@ def _write_project_file(inputs: dict, user) -> Any:
 
 def _restart_service(inputs: dict, user) -> Any:
     """
-    Restarts the web container (daily-log-backend) via the Docker Engine API
+    Restarts the web container (SIGplatform-web) via the Docker Engine API
     over the UNIX socket — no docker CLI binary required.
     Returns immediately; the actual restart fires ~2 s later so the HTTP
     response can be flushed to the client before the connection drops.
@@ -415,7 +415,7 @@ def _restart_service(inputs: dict, user) -> Any:
         try:
             conn = _UnixHTTPConnection(sock_path)
             # t=5 → 5-second grace period before SIGKILL
-            conn.request("POST", "/containers/daily-log-backend/restart?t=5")
+            conn.request("POST", "/containers/SIGplatform-web/restart?t=5")
             conn.getresponse()
         except Exception:
             pass  # Container restarted — this thread dies naturally

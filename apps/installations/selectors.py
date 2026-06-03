@@ -5,11 +5,13 @@ Complex joins use raw SQL; simple lookups use the ORM.
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Any
 
 from django.db import connections
 
+from apps.core import cache_utils as cu
 from apps.sigtools.models import (
     CameraModel,
     CustomerGroup,
@@ -20,6 +22,8 @@ from apps.sigtools.models import (
     Site,
     SigtoolsUser,
 )
+
+logger = logging.getLogger(__name__)
 
 _DB = "sigtools"
 
@@ -32,6 +36,10 @@ def get_camera_catalog() -> list[dict]:
     Hierarchical camera catalog: Type → Brand → [Model].
     Uses raw SQL for the three-table join; returns a nested Python structure.
     """
+    return cu.cached("inst:catalog:camera_catalog", _compute_camera_catalog, cu.TTL_CATALOG)
+
+
+def _compute_camera_catalog() -> list[dict]:
     sql = """
         SELECT
             ct.id   AS type_id,  ct.name AS type_name,
@@ -78,39 +86,47 @@ def get_camera_catalog() -> list[dict]:
 
 
 def get_device_types() -> list[dict]:
-    return list(
-        DeviceType.objects.using(_DB)
-        .order_by("device_type", "brand", "model")
-        .values("id", "device_type", "brand", "model")
-    )
+    def _compute():
+        return list(
+            DeviceType.objects.using(_DB)
+            .order_by("device_type", "brand", "model")
+            .values("id", "device_type", "brand", "model")
+        )
+    return cu.cached("inst:catalog:device_types", _compute, cu.TTL_CATALOG)
 
 
 def get_vms_catalog() -> list[str]:
-    return list(
-        Server.objects.using(_DB)
-        .filter(deleted_at__isnull=True)
-        .exclude(vms_name__isnull=True)
-        .exclude(vms_name="")
-        .order_by("vms_name")
-        .values_list("vms_name", flat=True)
-        .distinct()
-    )
+    def _compute():
+        return list(
+            Server.objects.using(_DB)
+            .filter(deleted_at__isnull=True)
+            .exclude(vms_name__isnull=True)
+            .exclude(vms_name="")
+            .order_by("vms_name")
+            .values_list("vms_name", flat=True)
+            .distinct()
+        )
+    return cu.cached("inst:catalog:vms", _compute, cu.TTL_CATALOG)
 
 
 def get_installation_types() -> list[dict]:
-    return list(
-        InstallationType.objects.using(_DB)
-        .order_by("name")
-        .values("id", "name")
-    )
+    def _compute():
+        return list(
+            InstallationType.objects.using(_DB)
+            .order_by("name")
+            .values("id", "name")
+        )
+    return cu.cached("inst:catalog:installation_types", _compute, cu.TTL_CATALOG)
 
 
 def get_customer_groups() -> list[dict]:
-    return list(
-        CustomerGroup.objects.using(_DB)
-        .order_by("name")
-        .values("id", "name")
-    )
+    def _compute():
+        return list(
+            CustomerGroup.objects.using(_DB)
+            .order_by("name")
+            .values("id", "name")
+        )
+    return cu.cached("inst:catalog:customer_groups", _compute, cu.TTL_CATALOG)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +177,138 @@ def get_users_by_role(role_key: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Project Sites (staging — pre-verification)
+# ---------------------------------------------------------------------------
+
+def list_project_sites() -> list[dict]:
+    """
+    Returns all non-deleted project_sites (staging) ordered by created_at DESC,
+    enriched with installation info (lead tech, project owner, type, dates).
+    Cacheado (TTL corto) — el SSE empuja cambios en vivo y las escrituras invalidan.
+    """
+    return cu.cached("inst:project_sites", _compute_project_sites, cu.TTL_DASHBOARD)
+
+
+def _compute_project_sites() -> list[dict]:
+    sql = """
+        SELECT
+            ps.id,
+            ps.name,
+            ps.city,
+            ps.state_code,
+            ps.country_code,
+            ps.verification_status,
+            ps.created_by,
+            u_created.name    AS created_by_name,
+            ps.approval_requested_by,
+            u_req.name        AS approval_requested_by_name,
+            ps.rejection_reason,
+            ps.created_at,
+            ps.updated_at,
+            i.id              AS installation_id,
+            i.it_lead_tech_id,
+            u_tech.name       AS it_lead_tech_name,
+            i.project_owner,
+            u_own.name        AS project_owner_name,
+            it.name           AS installation_type,
+            i.Total_cameras   AS total_cameras,
+            i.starting_date,
+            i.limit_date
+        FROM project_sites ps
+        LEFT JOIN (
+            SELECT site_id, MAX(id) AS latest_id
+            FROM installations WHERE deleted_at IS NULL GROUP BY site_id
+        ) li ON li.site_id = ps.id
+        LEFT JOIN installations i        ON i.id = li.latest_id
+        LEFT JOIN users u_tech           ON u_tech.id = i.it_lead_tech_id
+        LEFT JOIN users u_own            ON u_own.id  = i.project_owner
+        LEFT JOIN users u_created        ON u_created.id = ps.created_by
+        LEFT JOIN users u_req            ON u_req.id     = ps.approval_requested_by
+        LEFT JOIN installation_types it  ON it.id     = i.installation_type_id
+        WHERE ps.deleted_at IS NULL
+        ORDER BY ps.created_at DESC
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql)
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def get_project_site_info(site_id: int) -> dict | None:
+    """
+    Returns full project_site info including extended fields.
+    Looks up by project_sites.id first, then by project_sites.site_id
+    (covers legacy sites already promoted to the sites table).
+    """
+    sql = """
+        SELECT
+            ps.id,
+            ps.name,
+            ps.city,
+            ps.state_code,
+            ps.country_code,
+            ps.address,
+            ps.ip_address,
+            ps.lat,
+            ps.long             AS lng,
+            ps.verification_status,
+            ps.created_by,
+            u_created.name      AS created_by_name,
+            ps.approval_requested_by,
+            u_req.name          AS approval_requested_by_name,
+            ps.rejection_reason,
+            ps.verified_by,
+            ps.verified_at,
+            ps.authorized_by,
+            ps.authorized_at,
+            ps.contract_value,
+            ps.hotel,
+            ps.flight_details,
+            ps.teams_channelid,
+            ps.teams_teamid,
+            ps.created_at,
+            ps.updated_at,
+            i.id              AS installation_id,
+            i.it_lead_tech_id,
+            u_tech.name       AS it_lead_tech_name,
+            i.project_owner,
+            u_own.name        AS project_owner_name,
+            it.name           AS installation_type,
+            i.Total_cameras   AS total_cameras,
+            i.starting_date,
+            i.limit_date
+        FROM project_sites ps
+        LEFT JOIN (
+            SELECT site_id, MAX(id) AS latest_id
+            FROM installations WHERE deleted_at IS NULL GROUP BY site_id
+        ) li ON li.site_id = ps.id
+        LEFT JOIN installations i        ON i.id = li.latest_id
+        LEFT JOIN users u_tech           ON u_tech.id = i.it_lead_tech_id
+        LEFT JOIN users u_own            ON u_own.id  = i.project_owner
+        LEFT JOIN users u_created        ON u_created.id = ps.created_by
+        LEFT JOIN users u_req            ON u_req.id     = ps.approval_requested_by
+        LEFT JOIN installation_types it  ON it.id     = i.installation_type_id
+        WHERE (ps.id = %s OR ps.site_id = %s) AND ps.deleted_at IS NULL
+        ORDER BY ps.id DESC
+        LIMIT 1
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [site_id, site_id])
+        cols = [c[0] for c in cur.description]
+        row = cur.fetchone()
+        if not row:
+            return None
+        result = dict(zip(cols, row))
+    # Merge overlay fields from default DB (SiteProjectInfo)
+    overlay = get_site_project_info_overlay(site_id)
+    result["check_in"] = overlay.check_in if overlay else None
+    result["check_out"] = overlay.check_out if overlay else None
+    result["paylocity_code"] = overlay.paylocity_code if overlay else None
+    result["extra_notes"] = overlay.extra_notes if overlay else None
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Sites
 # ---------------------------------------------------------------------------
 
@@ -194,7 +342,13 @@ def list_sites_dashboard() -> list[dict]:
     Two queries are used to avoid N+1:
     1. Main SQL — sites + latest installation + status + responsable + it_manager
     2. Notes SQL — all notes for the relevant installations in one batch
+
+    Cacheado (TTL corto) — el SSE empuja cambios en vivo y las escrituras invalidan.
     """
+    return cu.cached("inst:sites_dashboard", _compute_sites_dashboard, cu.TTL_DASHBOARD)
+
+
+def _compute_sites_dashboard() -> list[dict]:
     main_sql = """
         SELECT
             s.id,
@@ -203,10 +357,14 @@ def list_sites_dashboard() -> list[dict]:
             s.city,
             s.state_code,
             s.customer_group_id,
-            ist.name   AS status,
-            u.name     AS responsable,
-            it_u.name  AS it_manager,
-            i.id       AS installation_id
+            ist.name            AS status,
+            u.name              AS responsable,
+            it_u.name           AS it_manager,
+            i.id                AS installation_id,
+            i.Total_cameras     AS total_cameras,
+            i.Total_views       AS total_views,
+            i.starting_date,
+            i.limit_date
         FROM sites s
         LEFT JOIN (
             SELECT site_id, MAX(id) AS latest_id
@@ -232,6 +390,7 @@ def list_sites_dashboard() -> list[dict]:
         rows = [dict(zip(cols, row)) for row in cur.fetchall()]
 
     inst_ids = [r["installation_id"] for r in rows if r["installation_id"] is not None]
+    site_ids_list = [r["id"] for r in rows]
 
     notes_by_inst: dict[int, list[dict]] = defaultdict(list)
     if inst_ids:
@@ -256,13 +415,43 @@ def list_sites_dashboard() -> list[dict]:
                     "date": ts.isoformat() if ts else None,
                     "action": note_row["note"],
                     "user": note_row["user_name"] or "Unknown",
+                    "type": "note",
                 })
+
+    # Device activity logs per site (SiteDeviceLog — default DB)
+    activity_by_site: dict[int, list[dict]] = defaultdict(list)
+    if site_ids_list:
+        from apps.installations.models import SiteDeviceLog
+        logs = (
+            SiteDeviceLog.objects
+            .filter(site_id__in=site_ids_list)
+            .order_by("created_at")
+            .values("site_id", "device_id", "action", "created_at", "user_id", "notes")
+        )
+        for lg in logs:
+            ts = lg["created_at"]
+            activity_by_site[lg["site_id"]].append({
+                "date":   ts.isoformat() if ts else None,
+                "action": lg["action"],
+                "device": lg["device_id"],
+                "user":   lg["user_id"],
+                "notes":  lg["notes"] or None,
+                "type":   "activity",
+            })
 
     result = []
     for row in rows:
         inst_id = row["installation_id"]
-        log_entries = notes_by_inst.get(inst_id, [])
+        site_id = row["id"]
+        note_entries    = notes_by_inst.get(inst_id, [])
+        activity_entries = activity_by_site.get(site_id, [])
+        # Merge and sort by date oldest→newest
+        log_entries = sorted(
+            note_entries + activity_entries,
+            key=lambda e: e["date"] or "",
+        )
         location = ", ".join(filter(None, [row.get("city"), row.get("state_code")])) or None
+        latest_note = note_entries[-1]["action"] if note_entries else None
         result.append({
             "id": row["id"],
             "name": row["name"],
@@ -271,9 +460,14 @@ def list_sites_dashboard() -> list[dict]:
             "location": location,
             "responsable": row["responsable"] or None,
             "it_manager": row["it_manager"] or None,
-            "notes": log_entries[-1]["action"] if log_entries else None,
+            "notes": latest_note,
             "log": log_entries,
+            "log_count": len(log_entries),
             "customer_group_id": row["customer_group_id"],
+            "total_cameras": row.get("total_cameras"),
+            "total_views": row.get("total_views"),
+            "starting_date": row.get("starting_date"),
+            "limit_date": row.get("limit_date"),
         })
     return result
 
@@ -372,6 +566,10 @@ def get_camera_model_catalog() -> list[dict]:
     reuse the same TypeScript interface. serial and ip are always None
     because these are model definitions, not physical units.
     """
+    return cu.cached("inst:catalog:camera_model_catalog", _compute_camera_model_catalog, cu.TTL_CATALOG)
+
+
+def _compute_camera_model_catalog() -> list[dict]:
     sql = """
         SELECT
             cm.id          AS model_id,
@@ -530,10 +728,46 @@ def get_site_device_catalog(site_id: int) -> list[dict]:
     with a consistent shape.  All fields that don't apply to a given device
     type are returned as None so the frontend interface stays stable.
 
+    Serial numbers are enriched from inv_articles notes ([device:XXX] tags) so
+    the frontend never needs to download the full article list for this purpose.
+
     Order: cameras first (sorted by subtype/brand/name), then other devices
     sorted by device_type/brand/model.
     """
-    return _get_site_cameras_for_catalog(site_id) + _get_site_other_devices_for_catalog(site_id)
+    catalog = _get_site_cameras_for_catalog(site_id) + _get_site_other_devices_for_catalog(site_id)
+    return _enrich_catalog_serials(catalog)
+
+
+def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
+    """
+    For any catalog item where serial is None, look up inv_articles.device_id
+    (an indexed column) to find a matching article and copy its serial over.
+
+    Uses WHERE device_id IN (...) — fully indexed, no full scan.
+    """
+    needs_serial = [item for item in catalog if not item.get("serial")]
+    if not needs_serial:
+        return catalog
+
+    device_ids = [item["id"] for item in needs_serial]
+    placeholders = ",".join(["%s"] * len(device_ids))
+    with connections["default"].cursor() as cur:
+        cur.execute(
+            f"SELECT device_id, serial FROM inv_articles "
+            f"WHERE device_id IN ({placeholders}) AND serial != '' AND device_id != ''",
+            device_ids,
+        )
+        device_serial_map = {row[0]: row[1] for row in cur.fetchall()}
+
+    if not device_serial_map:
+        return catalog
+
+    for item in needs_serial:
+        found = device_serial_map.get(item["id"])
+        if found:
+            item["serial"] = found
+
+    return catalog
 
 
 def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
@@ -545,13 +779,15 @@ def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
             cb.Name        AS brand,
             ct.name        AS subtype,
             ct.description AS type_desc,
-            d.address      AS ip
+            d.address      AS ip,
+            v.View_name    AS view_name
         FROM cameras c
         JOIN camera_models cm  ON c.camera_model_id = cm.id
         JOIN camera_brands cb  ON cm.camera_brand_id = cb.id
         JOIN camera_types  ct  ON cm.camera_type_id  = ct.id
         JOIN installations i   ON c.installation_id  = i.id
         LEFT JOIN devices  d   ON c.device_id        = d.id
+        LEFT JOIN views    v   ON v.camera_id = c.id AND v.deleted_at IS NULL
         WHERE i.site_id = %s
           AND i.deleted_at IS NULL
           AND c.deleted_at IS NULL
@@ -580,6 +816,7 @@ def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
             "bandwidth_mbps": None,
             "poe_budget_watts": None,
             "uplink_mbps": None,
+            "view_name": row["view_name"] or None,
         }
         for row in rows
     ]
@@ -635,6 +872,7 @@ def _get_site_other_devices_for_catalog(site_id: int) -> list[dict]:
             "bandwidth_mbps": None,
             "poe_budget_watts": None,
             "uplink_mbps": None,
+            "view_name": None,
         })
     return result
 
@@ -718,9 +956,11 @@ def get_installation_design(inst_id: int) -> dict | None:
         raw = row[0]
         try:
             return json.loads(raw) if isinstance(raw, str) else (raw or {})
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            logger.warning("get_installation_design: visual_metadata JSON inválido para inst=%s: %s", inst_id, exc)
             return {}
-    except Exception:
+    except Exception as exc:
+        logger.warning("get_installation_design falló para inst=%s: %s", inst_id, exc)
         return {}
 
 
@@ -764,7 +1004,8 @@ def get_device_positions() -> list[dict]:
                 "SELECT visual_metadata FROM installations WHERE deleted_at IS NULL"
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        logger.warning("get_device_positions: query a installations falló: %s", exc)
         return []
 
     items: list[dict] = []
@@ -796,16 +1037,39 @@ def get_device_positions() -> list[dict]:
 def list_sig_projects() -> list[dict]:
     """Lists all SigProject rows ordered by updated_at DESC."""
     from apps.installations.models import SigProject
-    qs = SigProject.objects.values("id", "name", "updated_at", "version", "data")
+    rows = list(
+        SigProject.objects.values(
+            "id",
+            "name",
+            "updated_at",
+            "version",
+            "data",
+            "created_by",
+            "approval_status",
+            "approval_requested_by",
+        )
+    )
+    user_ids = {
+        uid
+        for row in rows
+        for uid in (row.get("created_by"), row.get("approval_requested_by"))
+        if uid is not None
+    }
+    user_names = _sigtools_user_names_by_ids(user_ids)
     return [
         {
             "id": str(row["id"]),
             "name": row["name"],
             "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
             "version": row["version"],
+            "created_by": row.get("created_by"),
+            "created_by_name": user_names.get(row.get("created_by")),
+            "approval_status": row.get("approval_status") or "draft",
+            "approval_requested_by": row.get("approval_requested_by"),
+            "approval_requested_by_name": user_names.get(row.get("approval_requested_by")),
             "data": row["data"],
         }
-        for row in qs
+        for row in rows
     ]
 
 
@@ -821,8 +1085,32 @@ def get_sig_project(project_id: str) -> dict | None:
         "name": p.name,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
         "version": p.version,
+        "created_by": p.created_by,
+        "created_by_name": _sigtools_user_name_by_id(p.created_by),
+        "approval_status": p.approval_status,
+        "approval_requested_by": p.approval_requested_by,
+        "approval_requested_by_name": _sigtools_user_name_by_id(p.approval_requested_by),
         "data": p.data,
     }
+
+
+def _sigtools_user_names_by_ids(user_ids: set[int]) -> dict[int, str]:
+    if not user_ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(user_ids))
+    sql = f"SELECT id, name FROM users WHERE id IN ({placeholders})"  # noqa: S608
+    with connections[_SIGTOOLS].cursor() as cur:
+        cur.execute(sql, list(user_ids))
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def _sigtools_user_name_by_id(user_id: int | None) -> str | None:
+    if not user_id:
+        return None
+    with connections[_SIGTOOLS].cursor() as cur:
+        cur.execute("SELECT name FROM users WHERE id = %s LIMIT 1", [user_id])
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 # ===========================================================================
@@ -1015,7 +1303,7 @@ def fetch_admin_user(user_id: int) -> dict | None:
     return d
 
 
-def fetch_admin_role(role_id: str) -> dict | None:
+def fetch_admin_role(role_id: int) -> dict | None:
     """Returns a single role (with permissions + user_count) from sigtools_beta, or None."""
     import json as _json
 
@@ -1110,6 +1398,114 @@ def get_site_progress(site_id: int, total_devices: int) -> dict:
     }
 
 
+def get_all_sites_dispatch_progress(site_ids: list[int] | None = None) -> list[dict]:
+    """
+    Batch dispatch progress for ALL active sites (or a filtered subset).
+
+    - total_cameras / total_devices: real counts from cameras + other_devices tables
+      (latest active installation per site), NOT the dispatch table count.
+    - dispatched / received / installed: from SiteDeviceDispatch overlay.
+    - pct_* denominators use total_devices so they reflect real inventory.
+
+    El caso global (site_ids=None) se cachea con TTL corto; el filtrado no.
+    """
+    if site_ids is None:
+        return cu.cached(
+            "inst:dispatch_progress",
+            lambda: _compute_all_sites_dispatch_progress(None),
+            cu.TTL_DASHBOARD,
+        )
+    return _compute_all_sites_dispatch_progress(site_ids)
+
+
+def _compute_all_sites_dispatch_progress(site_ids: list[int] | None = None) -> list[dict]:
+    from django.db.models import Count, Q
+
+    # 1. All active sites
+    if site_ids:
+        placeholders = ",".join(["%s"] * len(site_ids))
+        site_sql = f"SELECT id, name FROM sites WHERE id IN ({placeholders}) AND deleted_at IS NULL"
+        params = site_ids
+    else:
+        site_sql = "SELECT id, name FROM sites WHERE deleted_at IS NULL ORDER BY name"
+        params = []
+
+    with connections[_SIGTOOLS].cursor() as cur:
+        cur.execute(site_sql, params)
+        all_sites = {r[0]: r[1] for r in cur.fetchall()}
+
+    if not all_sites:
+        return []
+
+    id_list = list(all_sites.keys())
+    ph = ",".join(["%s"] * len(id_list))
+
+    # 2. Real device counts per site — cameras + other_devices via latest installation
+    device_count_sql = f"""
+        SELECT
+            i.site_id,
+            COUNT(DISTINCT c.id)  AS camera_count,
+            COUNT(DISTINCT od.id) AS other_count
+        FROM (
+            SELECT site_id, MAX(id) AS latest_id
+            FROM installations
+            WHERE site_id IN ({ph}) AND deleted_at IS NULL
+            GROUP BY site_id
+        ) li
+        JOIN installations i ON i.id = li.latest_id
+        LEFT JOIN cameras      c  ON c.installation_id  = i.id AND c.deleted_at  IS NULL
+        LEFT JOIN other_devices od ON od.installation_id = i.id AND od.deleted_at IS NULL
+        GROUP BY i.site_id
+    """
+    with connections[_SIGTOOLS].cursor() as cur:
+        cur.execute(device_count_sql, id_list)
+        device_counts = {
+            r[0]: {"cameras": r[1], "others": r[2]}
+            for r in cur.fetchall()
+        }
+
+    # 3. Dispatch overlay aggregates
+    qs = (
+        SiteDeviceDispatch.objects
+        .filter(site_id__in=id_list)
+        .values("site_id")
+        .annotate(
+            dispatched=Count("id", filter=Q(qty_sent__gt=0)),
+            received=Count("id",   filter=Q(qty_received__gt=0)),
+            installed=Count("id",  filter=Q(installed=True)),
+        )
+    )
+    dispatch_map = {r["site_id"]: r for r in qs}
+
+    # 4. Merge
+    result = []
+    for site_id, site_name in all_sites.items():
+        dc   = device_counts.get(site_id, {"cameras": 0, "others": 0})
+        disp = dispatch_map.get(site_id, {})
+        total_cameras = dc["cameras"]
+        total_devices = total_cameras + dc["others"]
+        dispatched    = disp.get("dispatched", 0)
+        received      = disp.get("received", 0)
+        installed     = disp.get("installed", 0)
+        denom         = total_devices or 1
+        result.append({
+            "site_id":        site_id,
+            "site_name":      site_name,
+            "total_cameras":  total_cameras,
+            "total_devices":  total_devices,
+            # keep "total" alias so frontend works with both field names
+            "total":          total_devices,
+            "dispatched":     dispatched,
+            "received":       received,
+            "installed":      installed,
+            "pct_dispatched": round(dispatched / denom * 100, 1) if total_devices else 0.0,
+            "pct_received":   round(received   / denom * 100, 1) if total_devices else 0.0,
+            "pct_installed":  round(installed  / denom * 100, 1) if total_devices else 0.0,
+        })
+    result.sort(key=lambda x: x["site_id"])
+    return result
+
+
 def get_user_app_permissions(user_id: int) -> list[str]:
     """Return flat list of permission keys for a user via sigtools_beta raw SQL."""
     sql = """
@@ -1135,3 +1531,89 @@ def get_user_app_roles(user_id: int) -> list[str]:
     with connections[_SIGTOOLS].cursor() as cur:
         cur.execute(sql, [user_id])
         return [row[0] for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# IT Test
+# ---------------------------------------------------------------------------
+
+def get_it_test_for_site(site_id: int):
+    """Returns the ItSiteTest for the given site or None."""
+    from apps.installations.models import ItSiteTest
+    return ItSiteTest.objects.filter(site_id=site_id).first()
+
+
+def get_site_tech_info(site_id: int) -> dict | None:
+    """Returns ip_address, timezone, and location for a site from sigtools_beta."""
+    sql = """
+        SELECT id, name, ip_address, timezone, city, state_code, country_code, address
+        FROM sites
+        WHERE id = %s AND deleted_at IS NULL
+        LIMIT 1
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [site_id])
+        cols = [c[0] for c in cur.description]
+        row = cur.fetchone()
+    if not row:
+        return None
+    data = dict(zip(cols, row))
+    parts = [p for p in [data.get("city"), data.get("state_code"), data.get("country_code")] if p]
+    data["location"] = ", ".join(parts) if parts else data.get("address")
+    return data
+
+
+def get_site_project_info_overlay(site_id: int):
+    """Returns the SiteProjectInfo overlay row or None."""
+    from apps.installations.models import SiteProjectInfo
+    return SiteProjectInfo.objects.filter(site_id=site_id).first()
+
+
+# ---------------------------------------------------------------------------
+# Dashboard init — unified first-load payload
+# ---------------------------------------------------------------------------
+
+def get_dashboard_init() -> dict:
+    """
+    Returns the three data sets needed for the first dashboard render in a
+    single call, eliminating 2 round-trips over high-latency LAN connections.
+
+    Keys:
+      sites             — list_sites_dashboard()
+      project_sites     — list_project_sites()
+      dispatch_progress — get_all_sites_dispatch_progress()
+    """
+    return {
+        "sites":             list_sites_dashboard(),
+        "project_sites":     list_project_sites(),
+        "dispatch_progress": get_all_sites_dispatch_progress(),
+    }
+
+
+# ── In-app notifications ──────────────────────────────────────────────────────
+
+def list_notifications(recipient_id: int, unread_only: bool = False) -> list[dict]:
+    """Return notifications for a user ordered by most recent first."""
+    from apps.installations.models import Notification
+
+    qs = Notification.objects.filter(recipient_id=recipient_id)
+    if unread_only:
+        qs = qs.filter(is_read=False)
+    return [
+        {
+            "id":                 n.id,
+            "title":              n.title,
+            "message":            n.message,
+            "type":               n.type,
+            "is_read":            n.is_read,
+            "related_project_id": str(n.related_project_id) if n.related_project_id else None,
+            "created_at":         n.created_at.isoformat(),
+        }
+        for n in qs
+    ]
+
+
+def count_unread_notifications(recipient_id: int) -> int:
+    from apps.installations.models import Notification
+
+    return Notification.objects.filter(recipient_id=recipient_id, is_read=False).count()

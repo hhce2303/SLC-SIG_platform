@@ -39,7 +39,7 @@ OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:14b")
 OLLAMA_TIMEOUT     = int(os.environ.get("OLLAMA_TIMEOUT", "300"))   # 5 min for large models
 BASE_APPS_DIR      = Path(os.environ.get("BASE_APPS_DIR", "/app/apps"))
 BACKUP_DIR         = Path(os.environ.get("CODEGEN_BACKUP_DIR", "/app/codegen_backups"))
-DOCKER_CONTAINER   = os.environ.get("DOCKER_CONTAINER_NAME", "daily-log-backend")
+DOCKER_CONTAINER   = os.environ.get("DOCKER_CONTAINER_NAME", "SIGplatform-web")
 
 _claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""), max_retries=0)
 

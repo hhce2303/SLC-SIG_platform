@@ -57,9 +57,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health/ || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["gunicorn", "config.wsgi:application", \
+CMD ["gunicorn", "config.asgi:application", \
      "--bind", "0.0.0.0:8000", \
-     "--workers", "3", \
-     "--timeout", "120", \
+     "--workers", "4", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "--timeout", "0", \
      "--access-logfile", "-", \
      "--error-logfile", "-"]

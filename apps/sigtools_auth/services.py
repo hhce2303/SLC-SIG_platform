@@ -9,6 +9,9 @@ from typing import Any
 from django.conf import settings
 from django.http import HttpResponse
 
+from django.contrib.auth.hashers import check_password
+from django.db import connections
+
 from apps.sigtools_auth import ldap_auth, token_utils
 from apps.sigtools.models import SigtoolsUser
 from apps.core.exceptions import ServiceException
@@ -26,34 +29,60 @@ TOKEN_EXPIRY_MINUTES: int = getattr(settings, "SIGTOOLS_TOKEN_EXPIRY_MINUTES", 4
 
 def login(username: str, password: str) -> dict[str, Any]:
     """
-    1. Authenticate via LDAP.
-    2. Look up (or register) user in sigtools_beta.users by username.
+    1. Try LDAP (Active Directory) authentication.
+    2. If LDAP fails, fall back to local DB password (for admin-created users).
     3. Generate a Sanctum-compatible token.
     Returns { "client_token": str, "user": dict, "access_level": int }.
     Raises ServiceException on auth failure.
     """
     ldap_result = ldap_auth.ldap_authenticate(username, password)
-    if not ldap_result["success"]:
-        raise ServiceException(ldap_result["message"])
 
-    # Get the SigtoolsUser — must already exist in sigtools_beta.users
-    try:
-        sig_user = SigtoolsUser.objects.using(_DB).get(
-            username__iexact=username,
-            deleted_at__isnull=True,
-        )
-    except SigtoolsUser.DoesNotExist:
-        # Fallback: try matching by email (username@sig.com)
+    if ldap_result["success"]:
+        # --- LDAP path (existing employees) ---
         try:
             sig_user = SigtoolsUser.objects.using(_DB).get(
-                email__iexact=f"{username}@{ldap_auth.LDAP_DOMAIN()}",
+                username__iexact=username,
                 deleted_at__isnull=True,
             )
         except SigtoolsUser.DoesNotExist:
-            raise ServiceException(
-                "LDAP authentication succeeded but this user has no account "
-                "in the SIG Tools system. Contact your administrator."
+            try:
+                sig_user = SigtoolsUser.objects.using(_DB).get(
+                    email__iexact=f"{username}@{ldap_auth.LDAP_DOMAIN()}",
+                    deleted_at__isnull=True,
+                )
+            except SigtoolsUser.DoesNotExist:
+                raise ServiceException(
+                    "LDAP authentication succeeded but this user has no account "
+                    "in the SIG Tools system. Contact your administrator."
+                )
+        access_level = ldap_result["ldap_response"]
+    else:
+        # --- Local DB fallback (admin-created platform users) ---
+        with connections[_DB].cursor() as cur:
+            cur.execute(
+                "SELECT id, password FROM users WHERE username = %s AND deleted_at IS NULL",
+                [username],
             )
+            row = cur.fetchone()
+
+        if not row:
+            raise ServiceException("Invalid credentials.")
+
+        user_id, stored_hash = row
+        if not stored_hash or not check_password(password, stored_hash):
+            raise ServiceException("Invalid credentials.")
+
+        try:
+            sig_user = SigtoolsUser.objects.using(_DB).get(pk=user_id)
+        except SigtoolsUser.DoesNotExist:
+            raise ServiceException("Invalid credentials.")
+
+        # Derive access_level from app_roles (any assigned role → level 1)
+        from apps.installations.selectors import get_user_app_roles
+        roles = get_user_app_roles(sig_user.pk)
+        access_level = 1 if roles else 0
+        if access_level == 0:
+            raise ServiceException("Invalid credentials.")
 
     client_token = token_utils.generate_sanctum_token(
         user_id=sig_user.pk,
@@ -70,7 +99,7 @@ def login(username: str, password: str) -> dict[str, Any]:
             "email": sig_user.email,
             "username": sig_user.username,
         },
-        "access_level": ldap_result["ldap_response"],
+        "access_level": access_level,
     }
 
 

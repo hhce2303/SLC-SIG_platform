@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import time
 
+from django.db import connections
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.views import View
@@ -18,6 +19,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core import cache_utils as cu
 from apps.installations import selectors, services
 from apps.installations.serializers import (
     AdminPermissionSerializer,
@@ -34,11 +36,14 @@ from apps.installations.serializers import (
     DeviceTypeSerializer,
     InstallationCreateSerializer,
     InstallationResponseSerializer,
+    InventoryExportResponseSerializer,
+    InventoryExportSerializer,
     InventoryItemSerializer,
     MessageResponseSerializer,
     SetParentSerializer,
     SigProjectCreateSerializer,
     SigProjectRenameSerializer,
+    SigProjectRequestApprovalSerializer,
     SigProjectSerializer,
     SigProjectUpdateSerializer,
     SimpleDropdownSerializer,
@@ -51,6 +56,8 @@ from apps.installations.serializers import (
     SiteDeviceLogSerializer,
     SiteDeviceLogWriteSerializer,
     SiteDeviceReceiveSerializer,
+    DeviceSerialWriteSerializer,
+    SiteDispatchProgressSerializer,
     SiteListItemSerializer,
     SiteOnboardingResponseSerializer,
     SiteOnboardingSerializer,
@@ -62,7 +69,16 @@ from apps.installations.serializers import (
     SyncPayloadSerializer,
     SyncResponseSerializer,
     UserSerializer,
+    ProjectSiteListItemSerializer,
+    ProjectSiteInfoSerializer,
+    ProjectSiteInfoUpdateSerializer,
+    ItSiteTestReadSerializer,
+    ItSiteTestWriteSerializer,
+    DashboardInitSerializer,
+    NotificationSerializer,
 )
+
+from apps.core.permissions import has_app_permission
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +223,8 @@ class SiteListView(APIView):
 
     @extend_schema(responses={200: SiteDashboardItemSerializer(many=True)})
     def get(self, request: Request) -> Response:
+        if request.query_params.get("fresh") == "1":
+            cu.invalidate("inst:sites_dashboard")
         data = selectors.list_sites_dashboard()
         return Response(data, status=status.HTTP_200_OK)
 
@@ -214,7 +232,21 @@ class SiteListView(APIView):
     def post(self, request: Request) -> Response:
         serializer = SiteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        site_id = services.create_site(serializer.validated_data)
+        data = serializer.validated_data
+
+        try:
+            if data.get("project_site_id"):
+                authorized_by = getattr(request.user, "id", None)
+                site_id = services.promote_project_site(
+                    project_site_id=data["project_site_id"],
+                    authorized_by=authorized_by,
+                )
+            else:
+                site_id = services.create_site(data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        cu.invalidate_dashboard()
         return Response({"site_id": site_id}, status=status.HTTP_201_CREATED)
 
 
@@ -234,9 +266,12 @@ class SiteOnboardingView(APIView):
         serializer = SiteOnboardingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            installation = services.create_site_with_installation(serializer.validated_data)
+            payload = dict(serializer.validated_data)
+            payload["created_by"] = getattr(request.user, "id", None)
+            installation = services.create_project_site_with_installation(payload)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        cu.invalidate_dashboard()
         return Response(installation, status=status.HTTP_201_CREATED)
 
 
@@ -335,6 +370,7 @@ class ProjectSyncView(APIView):
             id_mapping = services.sync_installation(inst_id, serializer.validated_data)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        cu.invalidate_dashboard()
         return Response({"success": True, "mapped_ids": id_mapping}, status=status.HTTP_200_OK)
 
 
@@ -445,6 +481,7 @@ class SigProjectListView(APIView):
             project_id=str(d["id"]) if d.get("id") else None,
             name=d["name"],
             data=d.get("data", {}),
+            created_by=getattr(request.user, "id", None),
         )
         return Response(project, status=status.HTTP_201_CREATED)
 
@@ -511,6 +548,25 @@ class SigProjectRenameView(APIView):
         return Response(project, status=status.HTTP_200_OK)
 
 
+class SigProjectRequestApprovalView(APIView):
+    """POST /api/v1/installations/sig-projects/<uuid>/request-approval/"""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=SigProjectRequestApprovalSerializer, responses={200: SigProjectSerializer})
+    def post(self, request: Request, project_id) -> Response:
+        serializer = SigProjectRequestApprovalSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        project = services.request_sig_project_approval(
+            project_id=str(project_id),
+            requested_by=getattr(request.user, "id", None),
+            note=serializer.validated_data.get("note", ""),
+        )
+        if project is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(project, status=status.HTTP_200_OK)
+
+
 # ===========================================================================
 # Supabase — Admin
 # ===========================================================================
@@ -559,20 +615,18 @@ class AdminUserDetailView(APIView):
             user_id=user_id,
             full_name=d.get("full_name"),
             role_names=d.get("role_names"),
+            is_active=d.get("is_active"),
         )
         if user is None:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(user, status=status.HTTP_200_OK)
 
-    @extend_schema(responses={200: MessageResponseSerializer, 404: None})
+    @extend_schema(responses={204: None, 404: None})
     def delete(self, request: Request, user_id: int) -> Response:
         deactivated = services.deactivate_admin_user(user_id)
         if not deactivated:
             return Response({"detail": "User not found or already inactive."}, status=status.HTTP_404_NOT_FOUND)
-        return Response(
-            {"success": True, "message": f"User {user_id} deactivated."},
-            status=status.HTTP_200_OK,
-        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AdminRolesView(APIView):
@@ -604,8 +658,8 @@ class AdminRolesView(APIView):
 
 class AdminRoleDetailView(APIView):
     """
-    PATCH  /api/v1/installations/admin/roles/<uuid>/ — update role metadata / permissions
-    DELETE /api/v1/installations/admin/roles/<uuid>/ — delete role (rejects if is_system)
+    PATCH  /api/v1/installations/admin/roles/<int>/ — update role metadata / permissions
+    DELETE /api/v1/installations/admin/roles/<int>/ — delete role (rejects if is_system)
     """
 
     permission_classes = [IsAuthenticated]
@@ -616,7 +670,7 @@ class AdminRoleDetailView(APIView):
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
         role = services.update_admin_role(
-            role_id=str(role_id),
+            role_id=role_id,
             label=d.get("label"),
             description=d.get("description"),
             color=d.get("color"),
@@ -628,7 +682,7 @@ class AdminRoleDetailView(APIView):
 
     @extend_schema(responses={200: MessageResponseSerializer, 404: None, 409: None})
     def delete(self, request: Request, role_id) -> Response:
-        result = services.delete_admin_role(str(role_id))
+        result = services.delete_admin_role(role_id)
         if result is False:
             return Response({"detail": "Role not found."}, status=status.HTTP_404_NOT_FOUND)
         if result == "system":
@@ -663,7 +717,12 @@ class SiteDeviceDispatchView(APIView):
     def patch(self, request: Request, site_id: int, device_id: str) -> Response:
         ser = SiteDeviceDispatchWriteSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        dispatch = services.upsert_device_dispatch(site_id, device_id, **ser.validated_data)
+        dispatch = services.upsert_device_dispatch(
+            site_id,
+            device_id,
+            actor_user_id=getattr(request.user, "id", None),
+            **ser.validated_data,
+        )
         services.log_device_activity(
             site_id, device_id, "dispatch_updated",
             getattr(request.user, "id", None),
@@ -715,6 +774,20 @@ class SiteDeviceInstallView(APIView):
         return Response(SiteDeviceDispatchSerializer(dispatch).data, status=status.HTTP_200_OK)
 
 
+class SiteDeviceSerialView(APIView):
+    """PATCH /sites/<site_id>/catalog/<device_id>/serial/ — update device serial."""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request: Request, site_id: int, device_id: str) -> Response:
+        ser = DeviceSerialWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            services.update_device_serial(site_id, device_id, ser.validated_data["serial"])
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"device_id": device_id, "serial": ser.validated_data["serial"]}, status=status.HTTP_200_OK)
+
+
 class SiteDeviceLogsView(APIView):
     """GET/POST /sites/<site_id>/catalog/<device_id>/logs/"""
     permission_classes = [IsAuthenticated]
@@ -747,45 +820,269 @@ class SiteProgressView(APIView):
         return Response(SiteProgressSerializer(data).data, status=status.HTTP_200_OK)
 
 
+class SitesDispatchProgressView(APIView):
+    """GET /sites/dispatch-progress/ — batch dispatch progress for all sites."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: SiteDispatchProgressSerializer(many=True)})
+    def get(self, request: Request) -> Response:
+        raw_ids = request.query_params.get("site_ids")
+        site_ids = None
+        if raw_ids:
+            try:
+                site_ids = [int(x) for x in raw_ids.split(",") if x.strip()]
+            except ValueError:
+                return Response({"detail": "site_ids must be comma-separated integers."}, status=status.HTTP_400_BAD_REQUEST)
+        data = selectors.get_all_sites_dispatch_progress(site_ids)
+        return Response(SiteDispatchProgressSerializer(data, many=True).data, status=status.HTTP_200_OK)
+
+
+class InventoryExportView(APIView):
+    """
+    POST /inventory/export/
+    Takes the full canvas snapshot and upserts cameras / other_devices for an
+    installation. Safe to call multiple times — devices already in visual_metadata
+    are skipped, only new canvas devices are created.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=InventoryExportSerializer, responses={200: InventoryExportResponseSerializer})
+    def post(self, request: Request) -> Response:
+        serializer = InventoryExportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        d = serializer.validated_data
+        try:
+            result = services.export_inventory_from_canvas(
+                installation_id=d["installation_id"],
+                payload=d,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        cu.invalidate_dashboard()
+        return Response(result, status=status.HTTP_200_OK)
+
+
 # ---------------------------------------------------------------------------
 # SSE stream for real-time installation updates
 # ---------------------------------------------------------------------------
 
-class InstallationsSSEView(View):
+async def installations_sse_stream(request):
     """
     GET /api/v1/installations/stream/
-    Server-Sent Events: emits dispatch_updated events whenever a
-    SiteDeviceDispatch record changes.
+    Server-Sent Events: escucha el canal Redis rt:installations.
+
+    Eventos (publicados por services.py y run_realtime_poller):
+      dispatch_updated      — SiteDeviceDispatch cambió
+      activity_logged       — SiteDeviceLog creado
+      site_updated          — sites/project_sites en sigtools
+      project_updated       — installations en sigtools
+      device_status_changed — cameras/other_devices en sigtools
+      article_updated       — articles en sigtools
+    """
+    from apps.core.realtime import CH_INSTALLATIONS
+    from apps.core.sse import sse_stream
+    return await sse_stream(CH_INSTALLATIONS, request)
+
+
+async def projects_sse_stream(request):
+    """
+    GET /api/v1/installations/projects/stream/
+    Server-Sent Events: escucha el canal Redis rt:projects.
+
+    Eventos:
+      project_updated      — SigProject (BD local) cambió
+      installation_updated — installations en sigtools
+      project_site_updated — project_sites en sigtools
+    """
+    from apps.core.realtime import CH_PROJECTS
+    from apps.core.sse import sse_stream
+    return await sse_stream(CH_PROJECTS, request)
+
+
+# ---------------------------------------------------------------------------
+# Project Sites (staging)
+# ---------------------------------------------------------------------------
+
+class DashboardInitView(APIView):
+    """
+    GET /api/v1/installations/dashboard-init/
+
+    Unified first-load payload: combines sites, project_sites, and
+    dispatch_progress into a single round-trip.  Eliminates 2 extra HTTP
+    requests on high-latency LAN connections.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: DashboardInitSerializer})
+    def get(self, request: Request) -> Response:
+        if request.query_params.get("fresh") == "1":
+            cu.invalidate_dashboard()
+        data = selectors.get_dashboard_init()
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class ProjectSiteListView(APIView):
+    """GET /api/v1/installations/project-sites/ — list all staging sites."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: ProjectSiteListItemSerializer(many=True)}, tags=["project-sites"])
+    def get(self, request: Request) -> Response:
+        return Response(selectors.list_project_sites(), status=status.HTTP_200_OK)
+
+
+class ProjectSiteInfoView(APIView):
+    """
+    GET  /api/v1/installations/sites/<id>/info/ — extended project site info
+    PATCH /api/v1/installations/sites/<id>/info/ — update editable fields
     """
 
-    POLL_INTERVAL = 5
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: ProjectSiteInfoSerializer}, tags=["project-sites"])
+    def get(self, request: Request, site_id: int) -> Response:
+        info = selectors.get_project_site_info(site_id)
+        if info is None:
+            return Response({"detail": "Project site not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(info, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=ProjectSiteInfoUpdateSerializer,
+        responses={200: ProjectSiteInfoSerializer},
+        tags=["project-sites"],
+    )
+    def patch(self, request: Request, site_id: int) -> Response:
+        serializer = ProjectSiteInfoUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        updated = services.update_project_site_info(site_id, serializer.validated_data)
+        if updated is None:
+            return Response({"detail": "Project site not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(updated, status=status.HTTP_200_OK)
+
+
+class ItSiteTestView(APIView):
+    """
+    GET  /api/v1/installations/sites/<site_id>/it-test/  — requires installations.ittest.view
+    PUT  /api/v1/installations/sites/<site_id>/it-test/  — requires installations.ittest.edit
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: ItSiteTestReadSerializer}, tags=["it-test"])
+    def get(self, request: Request, site_id: int) -> Response:
+        if not has_app_permission(request.user, "installations.ittest.view"):
+            return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        tech_info = selectors.get_site_tech_info(site_id)
+        if tech_info is None:
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        it_test = selectors.get_it_test_for_site(site_id)
+        payload = {
+            "site_id":    site_id,
+            "site_name":  tech_info.get("name"),
+            "ip_address": tech_info.get("ip_address"),
+            "timezone":   tech_info.get("timezone"),
+            "location":   tech_info.get("location"),
+            "references":   it_test.references   if it_test else [],
+            "camera_flags": it_test.camera_flags  if it_test else [],
+            "checklist":    it_test.checklist      if it_test else [],
+            "grade":        it_test.grade          if it_test else "",
+            "summary":      it_test.summary        if it_test else "",
+            "delays":       it_test.delays         if it_test else [],
+            "attachments":  it_test.attachments    if it_test else [],
+            "date":         it_test.date           if it_test else None,
+            "start_time":   it_test.start_time     if it_test else None,
+            "end_time":     it_test.end_time       if it_test else None,
+            "technicians":  it_test.technicians    if it_test else [],
+            "it_personnel": it_test.it_personnel   if it_test else "",
+            "created_at":   it_test.created_at     if it_test else None,
+            "updated_at":   it_test.updated_at     if it_test else None,
+        }
+        serializer = ItSiteTestReadSerializer(payload)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=ItSiteTestWriteSerializer,
+        responses={200: ItSiteTestReadSerializer},
+        tags=["it-test"],
+    )
+    def put(self, request: Request, site_id: int) -> Response:
+        if not has_app_permission(request.user, "installations.ittest.edit"):
+            return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        tech_info = selectors.get_site_tech_info(site_id)
+        if tech_info is None:
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        write_ser = ItSiteTestWriteSerializer(data=request.data)
+        write_ser.is_valid(raise_exception=True)
+        it_test = services.upsert_it_test(site_id, write_ser.validated_data)
+        payload = {
+            "site_id":    site_id,
+            "site_name":  tech_info.get("name"),
+            "ip_address": tech_info.get("ip_address"),
+            "timezone":   tech_info.get("timezone"),
+            "location":   tech_info.get("location"),
+            "references":   it_test.references,
+            "camera_flags": it_test.camera_flags,
+            "checklist":    it_test.checklist,
+            "grade":        it_test.grade,
+            "summary":      it_test.summary,
+            "delays":       it_test.delays,
+            "attachments":  it_test.attachments,
+            "date":         it_test.date,
+            "start_time":   it_test.start_time,
+            "end_time":     it_test.end_time,
+            "technicians":  it_test.technicians,
+            "it_personnel": it_test.it_personnel,
+            "created_at":   it_test.created_at,
+            "updated_at":   it_test.updated_at,
+        }
+        serializer = ItSiteTestReadSerializer(payload)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+class NotificationListView(APIView):
+    """
+    GET  /api/v1/installations/notifications/
+        Returns all notifications for request.user, ordered by most recent.
+        Query param: ?unread_only=true to filter unread only.
+    """
 
     def get(self, request):
-        from apps.installations.models import SiteDeviceDispatch
+        unread_only = request.query_params.get("unread_only", "").lower() in ("1", "true", "yes")
+        notifications = selectors.list_notifications(
+            recipient_id=request.user.id,
+            unread_only=unread_only,
+        )
+        unread_count = selectors.count_unread_notifications(request.user.id)
+        serializer = NotificationSerializer(notifications, many=True)
+        return Response({"results": serializer.data, "unreadCount": unread_count})
 
-        def event_stream():
-            last_check = timezone.now()
-            yield "event: connected\ndata: {}\n\n"
-            while True:
-                time.sleep(self.POLL_INTERVAL)
-                now = timezone.now()
-                changed = SiteDeviceDispatch.objects.filter(updated_at__gt=last_check)
-                if changed.exists():
-                    payload = [
-                        {
-                            "site_id":   d.site_id,
-                            "device_id": d.device_id,
-                            "installed": d.installed,
-                            "qty_received": d.qty_received,
-                            "qty_sent":  d.qty_sent,
-                        }
-                        for d in changed
-                    ]
-                    yield f"event: dispatch_updated\ndata: {json.dumps(payload)}\n\n"
-                last_check = now
-                yield ": heartbeat\n\n"
 
-        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
-        response["Cache-Control"] = "no-cache"
-        response["X-Accel-Buffering"] = "no"
-        return response
+class NotificationMarkReadView(APIView):
+    """
+    POST /api/v1/installations/notifications/<pk>/read/
+        Marks a single notification as read for request.user.
+    """
+
+    def post(self, request, pk: int):
+        found = services.mark_notification_read(
+            notification_id=pk,
+            recipient_id=request.user.id,
+        )
+        if not found:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"detail": "Marked as read."})
+
+
+class NotificationMarkAllReadView(APIView):
+    """
+    POST /api/v1/installations/notifications/read-all/
+        Marks all notifications for request.user as read.
+    """
+
+    def post(self, request):
+        count = services.mark_all_notifications_read(recipient_id=request.user.id)
+        return Response({"detail": f"{count} notification(s) marked as read.", "count": count})

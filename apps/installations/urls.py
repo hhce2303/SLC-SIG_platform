@@ -25,7 +25,11 @@ urlpatterns = [
 
     # --- Sites ---
     path("sites/", views.SiteListView.as_view(), name="site-list"),
+    path("sites/dispatch-progress/", views.SitesDispatchProgressView.as_view(), name="sites-dispatch-progress"),
     path("onboarding/", views.SiteOnboardingView.as_view(), name="site-onboarding"),
+    path("project-sites/", views.ProjectSiteListView.as_view(), name="project-site-list"),
+    path("sites/<int:site_id>/info/", views.ProjectSiteInfoView.as_view(), name="project-site-info"),
+    path("sites/<int:site_id>/it-test/", views.ItSiteTestView.as_view(), name="site-it-test"),
     path("sites/<int:site_id>/", views.SiteDetailView.as_view(), name="site-detail"),
     path("sites/<int:site_id>/status/", views.SiteStatusView.as_view(), name="site-status"),
     path("sites/<int:site_id>/inventory/", views.SiteInventoryView.as_view(), name="site-inventory"),
@@ -48,21 +52,35 @@ urlpatterns = [
     path("sig-projects/", views.SigProjectListView.as_view(), name="sig-project-list"),
     path("sig-projects/<uuid:project_id>/", views.SigProjectDetailView.as_view(), name="sig-project-detail"),
     path("sig-projects/<uuid:project_id>/name/", views.SigProjectRenameView.as_view(), name="sig-project-rename"),
+    path("sig-projects/<uuid:project_id>/request-approval/", views.SigProjectRequestApprovalView.as_view(), name="sig-project-request-approval"),
 
     # --- Admin (sigtools_beta) ---
     path("admin/users/", views.AdminUsersView.as_view(), name="admin-users"),
     path("admin/users/<int:user_id>/", views.AdminUserDetailView.as_view(), name="admin-user-detail"),
     path("admin/roles/", views.AdminRolesView.as_view(), name="admin-roles"),
-    path("admin/roles/<uuid:role_id>/", views.AdminRoleDetailView.as_view(), name="admin-role-detail"),
+    path("admin/roles/<int:role_id>/", views.AdminRoleDetailView.as_view(), name="admin-role-detail"),
     path("admin/permissions/", views.AdminPermissionsView.as_view(), name="admin-permissions"),
 
     # --- Dispatch / Receipt / Installation ---
     path("sites/<int:site_id>/catalog/<str:device_id>/",         views.SiteDeviceDispatchView.as_view(),  name="site-device-dispatch"),
     path("sites/<int:site_id>/catalog/<str:device_id>/receive/", views.SiteDeviceReceiveView.as_view(),   name="site-device-receive"),
     path("sites/<int:site_id>/catalog/<str:device_id>/install/", views.SiteDeviceInstallView.as_view(),   name="site-device-install"),
+    path("sites/<int:site_id>/catalog/<str:device_id>/serial/",  views.SiteDeviceSerialView.as_view(),    name="site-device-serial"),
     path("sites/<int:site_id>/catalog/<str:device_id>/logs/",    views.SiteDeviceLogsView.as_view(),      name="site-device-logs"),
     path("sites/<int:site_id>/progress/",                        views.SiteProgressView.as_view(),        name="site-progress"),
 
-    # --- Real-time SSE ---
-    path("stream/", views.InstallationsSSEView.as_view(), name="installations-sse-stream"),
+    # --- Real-time SSE (async, Redis pub/sub) ---
+    path("stream/", views.installations_sse_stream, name="installations-sse-stream"),
+    path("projects/stream/", views.projects_sse_stream, name="projects-sse-stream"),
+
+    # --- Dashboard init (unified first-load payload) ---
+    path("dashboard-init/", views.DashboardInitView.as_view(), name="dashboard-init"),
+
+    # --- Inventory export (canvas → DB) ---
+    path("inventory/export/", views.InventoryExportView.as_view(), name="inventory-export"),
+
+    # --- In-app notifications ---
+    path("notifications/", views.NotificationListView.as_view(), name="notification-list"),
+    path("notifications/read-all/", views.NotificationMarkAllReadView.as_view(), name="notification-read-all"),
+    path("notifications/<int:pk>/read/", views.NotificationMarkReadView.as_view(), name="notification-read"),
 ]

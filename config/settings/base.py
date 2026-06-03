@@ -66,7 +66,9 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 # ---------------------------------------------------------------------------
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
+    # Wrapper async-capable de WhiteNoise: el original es sync-only y bufferiza
+    # los streams SSE (los eventos solo salían al cerrar la conexión).
+    "apps.core.middleware.whitenoise_async.AsyncWhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -122,6 +124,7 @@ DATABASES = {
         "PASSWORD": env("DB_PASSWORD"),
         "HOST": env("DB_HOST", default="127.0.0.1"),
         "PORT": env("DB_PORT", default="3306"),
+        "CONN_MAX_AGE": 60,
         "OPTIONS": {
             "charset": "utf8mb4",
             "connect_timeout": 10,
@@ -137,6 +140,7 @@ DATABASES = {
         "PASSWORD": env("INVENTORY_DB_PASSWORD", default=""),
         "HOST": env("INVENTORY_DB_HOST", default="192.168.101.135"),
         "PORT": env("INVENTORY_DB_PORT", default="3306"),
+        "CONN_MAX_AGE": 60,
         "OPTIONS": {
             "charset": "latin1",
             "connect_timeout": 10,
@@ -152,6 +156,7 @@ DATABASES = {
         "PASSWORD": env("SCHEDULES_DB_PASSWORD", default=""),
         "HOST": env("SCHEDULES_DB_HOST", default="192.168.101.135"),
         "PORT": env("SCHEDULES_DB_PORT", default="3306"),
+        "CONN_MAX_AGE": 60,
         "OPTIONS": {
             "charset": "utf8mb4",
             "connect_timeout": 10,
@@ -167,6 +172,7 @@ DATABASES = {
         "PASSWORD": env("SIGTOOLS_DB_PASSWORD"),
         "HOST": env("SIGTOOLS_DB_HOST", default="72.167.56.142"),
         "PORT": env("SIGTOOLS_DB_PORT", default="3306"),
+        "CONN_MAX_AGE": 60,
         "OPTIONS": {
             "charset": "utf8mb4",
             "connect_timeout": 10,
@@ -271,9 +277,25 @@ CORS_ALLOWED_ORIGINS = env.list(
         "https://localhost:5173",
         "http://localhost:5174",
         "https://localhost:5174",
+        "https://installations.sig.systems",
+        "https://inventory.sig.systems",
     ],
 )
 CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = env.list(
+    "CSRF_TRUSTED_ORIGINS",
+    default=[
+        "http://localhost:3000",
+        "https://localhost:3000",
+        "http://localhost:5173",
+        "https://localhost:5173",
+        "http://localhost:5174",
+        "https://localhost:5174",
+        "https://installations.sig.systems",
+        "https://inventory.sig.systems",
+    ],
+)
 
 # Permite cualquier origen en la subred 192.168.101.x (red local de desarrollo)
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -285,6 +307,14 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 # Teams webhook (damaged article alert)
 # ---------------------------------------------------------------------------
 TEAMS_WEBHOOK_URL = env("TEAMS_WEBHOOK_URL", default="")
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph Mail (Client Credentials)
+# ---------------------------------------------------------------------------
+MS_GRAPH_TENANT_ID = env("MS_GRAPH_TENANT_ID", default="")
+MS_GRAPH_CLIENT_ID = env("MS_GRAPH_CLIENT_ID", default="")
+MS_GRAPH_CLIENT_SECRET = env("MS_GRAPH_CLIENT_SECRET", default="")
+MS_GRAPH_SENDER = env("MS_GRAPH_SENDER", default="")
 
 # ---------------------------------------------------------------------------
 # drf-spectacular (OpenAPI)
@@ -313,6 +343,26 @@ SIGTOOLS_TOKEN_EXPIRY_MINUTES = env.int("SIGTOOLS_TOKEN_EXPIRY_MINUTES", default
 LDAP_HOST = env("LDAP_HOST", default="sig")
 LDAP_DOMAIN = env("LDAP_DOMAIN", default="sig.com")
 LDAP_BASE_DN = env("LDAP_BASE_DN", default="OU=OU User,DC=sig,DC=com")
+
+# ---------------------------------------------------------------------------
+# Redis — pub/sub y caché compartida
+# ---------------------------------------------------------------------------
+REDIS_URL = env("REDIS_URL", default="redis://localhost:6379/0")
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "SOCKET_CONNECT_TIMEOUT": 2,
+            "SOCKET_TIMEOUT": 2,
+            "IGNORE_EXCEPTIONS": True,  # si Redis cae, sigue con miss de caché
+        },
+        "KEY_PREFIX": "dlb",
+        "TIMEOUT": 300,  # 5 min default TTL
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Logging — errors to stdout so `docker logs` captures them

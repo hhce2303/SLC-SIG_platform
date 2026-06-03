@@ -16,16 +16,12 @@ This means DailyLog JWT endpoints are completely unaffected.
 """
 from __future__ import annotations
 
-import logging
-
 from django.conf import settings
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 from apps.sigtools_auth import token_utils
 from apps.sigtools_auth.models import PersonalAccessToken
-
-logger = logging.getLogger(__name__)
 
 COOKIE_NAME = getattr(settings, "SIGTOOLS_COOKIE_NAME", "sig_token")
 
@@ -67,6 +63,14 @@ class SigtoolsWebUser:
         return self._user.name
 
 
+_AUTH_CACHE_TTL = 60  # seconds — TTL del cache de autenticación
+
+
+def _cache_key_for_token(client_token: str) -> str:
+    import hashlib
+    return "sigauth:" + hashlib.sha256(client_token.encode()).hexdigest()[:32]
+
+
 class SigtoolsCookieAuthentication(BaseAuthentication):
     """
     Resolves the sig_token from two sources (in priority order):
@@ -76,19 +80,12 @@ class SigtoolsCookieAuthentication(BaseAuthentication):
     - Token absent   → return None (DRF continues to next authenticator)
     - Token invalid  → raise AuthenticationFailed (request rejected)
     - Token valid    → return (SigtoolsWebUser, pat)
+
+    Performance: el resultado de validar el token se cachea en Redis (TTL 60 s)
+    para evitar consultar la BD externa (sigtools_beta, Internet) en cada request.
     """
 
     def authenticate(self, request):
-        # DEBUG: log what auth tokens are present
-        has_cookie = COOKIE_NAME in request.COOKIES
-        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-        logger.warning(
-            "SigtoolsAuth: path=%s has_cookie=%s auth_header_prefix=%r",
-            request.path,
-            has_cookie,
-            auth_header[:20] if auth_header else "",
-        )
-
         # Source 1: HttpOnly cookie (browser)
         client_token = request.COOKIES.get(COOKIE_NAME)
 
@@ -105,8 +102,21 @@ class SigtoolsCookieAuthentication(BaseAuthentication):
         if not client_token:
             return None  # No token → try next authenticator
 
+        # Intentar leer del cache primero
+        from django.core.cache import cache
+        cache_key = _cache_key_for_token(client_token)
+        cached = cache.get(cache_key)
+        if cached == "invalid":
+            raise AuthenticationFailed("Invalid or expired session cookie.")
+        if cached is not None:
+            # cached es (sig_user, pat) — reconstruir SigtoolsWebUser
+            sig_user, pat = cached
+            return (SigtoolsWebUser(sig_user), pat)
+
+        # Cache miss — validar contra la BD
         pat: PersonalAccessToken | None = token_utils.validate_token(client_token)
         if pat is None:
+            cache.set(cache_key, "invalid", _AUTH_CACHE_TTL)
             raise AuthenticationFailed("Invalid or expired session cookie.")
 
         # Load the SigtoolsUser (from apps.sigtools.models — same DB)
@@ -114,8 +124,10 @@ class SigtoolsCookieAuthentication(BaseAuthentication):
         try:
             sig_user = SigtoolsUser.objects.using(_DB).get(pk=pat.tokenable_id)
         except SigtoolsUser.DoesNotExist:
+            cache.set(cache_key, "invalid", _AUTH_CACHE_TTL)
             raise AuthenticationFailed("User associated with this token no longer exists.")
 
+        cache.set(cache_key, (sig_user, pat), _AUTH_CACHE_TTL)
         return (SigtoolsWebUser(sig_user), pat)
 
     def authenticate_header(self, request) -> str:

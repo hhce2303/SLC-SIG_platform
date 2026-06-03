@@ -38,7 +38,7 @@ OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL", "sigtools-coder")
 OLLAMA_TIMEOUT     = int(os.environ.get("OLLAMA_TIMEOUT", "300"))   # 5 min for large models
 BASE_APPS_DIR      = Path(os.environ.get("BASE_APPS_DIR", "/app/apps"))
 BACKUP_DIR         = Path(os.environ.get("CODEGEN_BACKUP_DIR", "/app/codegen_backups"))
-DOCKER_CONTAINER   = os.environ.get("DOCKER_CONTAINER_NAME", "daily-log-backend")
+DOCKER_CONTAINER   = os.environ.get("DOCKER_CONTAINER_NAME", "SIGplatform-web")
 
 # (Anthropic client removed — code generation runs fully on the local model)
 # Project conventions are embedded in the Modelfile system prompt.

@@ -18,6 +18,8 @@ class SigtoolsUserSerializer(serializers.Serializer):
     name = serializers.CharField()
     email = serializers.EmailField()
     username = serializers.CharField(allow_null=True)
+    roles = serializers.ListField(child=serializers.CharField(), default=list)
+    permissions = serializers.ListField(child=serializers.CharField(), default=list)
 
 
 class WebLoginResponseSerializer(serializers.Serializer):

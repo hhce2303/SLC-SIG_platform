@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from apps.inventory.models import ActivityLog, Article, Group
+from apps.inventory.models import (
+    ActivityLog, Article, Group,
+    MaterialsRequest, DailyReport, CableRun,
+    ScopeChange, EquipmentReturn, ElevatorRental,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +35,7 @@ class ArticleReadSerializer(serializers.ModelSerializer):
     latestNote = serializers.CharField(source="latest_note")
     lastMod = serializers.DateTimeField(source="updated_at", format="%Y-%m-%dT%H:%M:%S")
     quantitySend = serializers.IntegerField(source="quantity_send", allow_null=True)
-    checklistReceived = serializers.NullBooleanField(source="checklist_received")
+    checklistReceived = serializers.BooleanField(source="checklist_received", allow_null=True)
     checklistNotes = serializers.CharField(source="checklist_notes")
     checklistDate = serializers.DateTimeField(source="checklist_date", allow_null=True)
 
@@ -83,7 +87,7 @@ class ArticleWriteSerializer(serializers.Serializer):
     tracking      = serializers.CharField(required=False, allow_blank=True, default="")
     observations  = serializers.CharField(required=False, allow_blank=True, default="")
     # checklist fields
-    checklist_received = serializers.NullBooleanField(required=False, default=None)
+    checklist_received = serializers.BooleanField(required=False, allow_null=True, default=None)
     checklist_notes    = serializers.CharField(required=False, allow_blank=True, default="")
     checklist_date     = serializers.DateTimeField(required=False, allow_null=True, default=None)
 
@@ -107,7 +111,7 @@ class ArticleUpdateSerializer(serializers.Serializer):
     tracking      = serializers.CharField(required=False, allow_blank=True)
     observations  = serializers.CharField(required=False, allow_blank=True)
     # checklist fields
-    checklist_received = serializers.NullBooleanField(required=False)
+    checklist_received = serializers.BooleanField(required=False, allow_null=True)
     checklist_notes    = serializers.CharField(required=False, allow_blank=True)
     checklist_date     = serializers.DateTimeField(required=False, allow_null=True)
 
@@ -152,3 +156,160 @@ class CamerasBySiteSerializer(serializers.Serializer):
     brand = serializers.CharField()
     model = serializers.CharField()
     camera_type = serializers.CharField()
+
+
+# ===========================================================================
+# Materials Request
+# ===========================================================================
+
+class MaterialsRequestReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MaterialsRequest
+        fields = [
+            "id", "site_id", "requested_by_id", "items", "status",
+            "notes", "reviewer_id", "reviewed_at", "created_at", "updated_at",
+        ]
+
+
+class MaterialsRequestWriteSerializer(serializers.Serializer):
+    site_id          = serializers.IntegerField()
+    items            = serializers.JSONField()
+    notes            = serializers.CharField(allow_blank=True, default="")
+
+
+class MaterialsRequestReviewSerializer(serializers.Serializer):
+    status           = serializers.ChoiceField(choices=["approved", "rejected"])
+    reviewer_notes   = serializers.CharField(allow_blank=True, default="")
+
+
+# ===========================================================================
+# Daily Report
+# ===========================================================================
+
+class DailyReportReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DailyReport
+        fields = [
+            "id", "site_id", "date", "submitted_by_id",
+            "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10", "q11",
+            "created_at",
+        ]
+
+
+class DailyReportWriteSerializer(serializers.Serializer):
+    site_id  = serializers.IntegerField()
+    date     = serializers.DateField()
+    q1  = serializers.CharField(allow_blank=True, default="")
+    q2  = serializers.CharField(allow_blank=True, default="")
+    q3  = serializers.CharField(allow_blank=True, default="")
+    q4  = serializers.CharField(allow_blank=True, default="")
+    q5  = serializers.CharField(allow_blank=True, default="")
+    q6  = serializers.CharField(allow_blank=True, default="")
+    q7  = serializers.CharField(allow_blank=True, default="")
+    q8  = serializers.CharField(allow_blank=True, default="")
+    q9  = serializers.CharField(allow_blank=True, default="")
+    q10 = serializers.CharField(allow_blank=True, default="")
+    q11 = serializers.CharField(allow_blank=True, default="")
+
+
+# ===========================================================================
+# Cable Run
+# ===========================================================================
+
+class CableRunReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CableRun
+        fields = "__all__"
+
+
+class CableRunWriteSerializer(serializers.Serializer):
+    site_id       = serializers.IntegerField()
+    label         = serializers.CharField(max_length=255)
+    from_location = serializers.CharField(max_length=255, allow_blank=True, default="")
+    to_location   = serializers.CharField(max_length=255, allow_blank=True, default="")
+    cable_type    = serializers.CharField(max_length=100, allow_blank=True, default="")
+    length_ft     = serializers.FloatField(allow_null=True, required=False)
+    status        = serializers.ChoiceField(choices=["pending", "complete"], default="pending")
+    notes         = serializers.CharField(allow_blank=True, default="")
+
+
+class CableRunUpdateSerializer(serializers.Serializer):
+    label         = serializers.CharField(max_length=255, required=False)
+    from_location = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    to_location   = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    cable_type    = serializers.CharField(max_length=100, allow_blank=True, required=False)
+    length_ft     = serializers.FloatField(allow_null=True, required=False)
+    status        = serializers.ChoiceField(choices=["pending", "complete"], required=False)
+    notes         = serializers.CharField(allow_blank=True, required=False)
+
+
+# ===========================================================================
+# Scope Change
+# ===========================================================================
+
+class ScopeChangeReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ScopeChange
+        fields = "__all__"
+
+
+class ScopeChangeWriteSerializer(serializers.Serializer):
+    site_id     = serializers.IntegerField()
+    description = serializers.CharField()
+    notes       = serializers.CharField(allow_blank=True, default="")
+
+
+class ScopeChangeReviewSerializer(serializers.Serializer):
+    status         = serializers.ChoiceField(choices=["approved", "rejected"])
+    reviewer_notes = serializers.CharField(allow_blank=True, default="")
+
+
+# ===========================================================================
+# Equipment Return
+# ===========================================================================
+
+class EquipmentReturnReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EquipmentReturn
+        fields = "__all__"
+
+
+class EquipmentReturnWriteSerializer(serializers.Serializer):
+    site_id      = serializers.IntegerField()
+    device_name  = serializers.CharField(max_length=255)
+    device_id    = serializers.CharField(max_length=255, allow_blank=True, default="")
+    reason       = serializers.CharField(allow_blank=True, default="")
+    qty_returned = serializers.IntegerField(default=1, min_value=1)
+    notes        = serializers.CharField(allow_blank=True, default="")
+
+
+class EquipmentReturnReceiveSerializer(serializers.Serializer):
+    notes = serializers.CharField(allow_blank=True, default="")
+
+
+# ===========================================================================
+# Operations Assignment
+# ===========================================================================
+
+class OperationsAssignmentSerializer(serializers.Serializer):
+    site_id    = serializers.IntegerField()
+    data       = serializers.JSONField()
+
+
+# ===========================================================================
+# Elevator Rental
+# ===========================================================================
+
+class ElevatorRentalReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ElevatorRental
+        fields = "__all__"
+
+
+class ElevatorRentalWriteSerializer(serializers.Serializer):
+    lift_required = serializers.BooleanField(default=False)
+    vendor        = serializers.CharField(max_length=255, allow_blank=True, default="")
+    rental_start  = serializers.DateField(allow_null=True, required=False)
+    rental_end    = serializers.DateField(allow_null=True, required=False)
+    cost          = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True, required=False)
+    notes         = serializers.CharField(allow_blank=True, default="")

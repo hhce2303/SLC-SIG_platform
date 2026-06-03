@@ -11,7 +11,7 @@ param(
     [string]$ApiBase = "http://192.168.101.135:8000"
 )
 
-$rawOut = docker exec daily-log-backend python -c "
+$rawOut = docker exec SIGplatform-web python -c "
 import os, django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings.production')
 django.setup()
