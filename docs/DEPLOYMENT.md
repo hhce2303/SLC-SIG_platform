@@ -1,5 +1,19 @@
 # SIGplatform — Deployment Guide
 
+## Production Environment
+
+| Item | Value |
+|---|---|
+| **Server** | MKS Server |
+| **Server IP** | `192.168.1.69` |
+| **API Base URL** | `http://192.168.1.69/api/v1/` |
+| **Admin** | `http://192.168.1.69/admin/` |
+| **Stack path** | `C:\Users\jjacome\Documents\GitHub\SLC-SIG_platform` |
+| **Stack file** | `docker/docker-compose.yml` |
+| **Web container** | `SIGplatform-web` |
+
+---
+
 ## Prerequisites
 
 - Docker Engine ≥ 24 and Docker Compose v2
@@ -12,7 +26,7 @@
 ### 1. Clone / copy the project
 
 ```bash
-git clone <repo-url> SIGplatform
+git clone https://github.com/hhce2303/SLC-SIG_platform.git SIGplatform
 cd SIGplatform
 ```
 
