@@ -489,6 +489,10 @@ class SigProjectRequestApprovalSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
 
+class SigProjectCancelApprovalSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
 # ===========================================================================
 # Admin — users — write (input serializers)
 # ===========================================================================

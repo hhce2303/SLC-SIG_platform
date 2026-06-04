@@ -41,6 +41,7 @@ from apps.installations.serializers import (
     InventoryItemSerializer,
     MessageResponseSerializer,
     SetParentSerializer,
+    SigProjectCancelApprovalSerializer,
     SigProjectCreateSerializer,
     SigProjectRenameSerializer,
     SigProjectRequestApprovalSerializer,
@@ -558,6 +559,25 @@ class SigProjectRequestApprovalView(APIView):
         serializer = SigProjectRequestApprovalSerializer(data=request.data or {})
         serializer.is_valid(raise_exception=True)
         project = services.request_sig_project_approval(
+            project_id=str(project_id),
+            requested_by=getattr(request.user, "id", None),
+            note=serializer.validated_data.get("note", ""),
+        )
+        if project is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(project, status=status.HTTP_200_OK)
+
+
+class SigProjectCancelApprovalView(APIView):
+    """POST /api/v1/installations/sig-projects/<uuid>/cancel-approval-request/"""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=SigProjectCancelApprovalSerializer, responses={200: SigProjectSerializer})
+    def post(self, request: Request, project_id) -> Response:
+        serializer = SigProjectCancelApprovalSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        project = services.cancel_sig_project_approval(
             project_id=str(project_id),
             requested_by=getattr(request.user, "id", None),
             note=serializer.validated_data.get("note", ""),

@@ -159,6 +159,39 @@ def _notify_project_approval_requested(*, project: dict, requester_name: str | N
         )
 
 
+def _notify_project_approval_cancelled(*, project: dict, requester_name: str | None, note: str) -> None:
+    admin_emails = _sigtools_admin_emails()
+    admin_user_ids = _sigtools_admin_user_ids()
+
+    if admin_emails:
+        safe_name = escape(project.get("name") or "(sin nombre)")
+        safe_requester = escape(requester_name or "Usuario")
+        safe_note = escape(note or "")
+        html = (
+            f"<p>Se canceló la solicitud de aprobación para el proyecto GIS <b>{safe_name}</b>.</p>"
+            f"<p>Cancelado por: <b>{safe_requester}</b></p>"
+        )
+        if safe_note:
+            html += f"<p>Nota: {safe_note}</p>"
+        _send_graph_mail_safe(
+            to_emails=admin_emails,
+            subject=f"[Installations] Approval request cancelled: {project.get('name')}",
+            html_content=html,
+        )
+
+    if admin_user_ids:
+        _create_notifications_bulk(
+            recipient_ids=admin_user_ids,
+            title=f"Aprobación cancelada: {project.get('name', '')}",
+            message=(
+                f"{requester_name or 'Un usuario'} canceló la solicitud de aprobación para el proyecto "
+                f"'{project.get('name', '')}'. {('Nota: ' + note) if note else ''}"
+            ).strip(),
+            notif_type="approval_cancelled",
+            related_project_id=project.get("id"),
+        )
+
+
 def _notify_project_promoted_to_onboarding(
     *,
     site_id: int,
@@ -1667,6 +1700,34 @@ def request_sig_project_approval(
 
     transaction.on_commit(
         lambda: _notify_project_approval_requested(project=result, requester_name=requester_name, note=note),
+    )
+    transaction.on_commit(lambda: _publish_project(result))
+    return result
+
+
+@transaction.atomic
+def cancel_sig_project_approval(
+    *,
+    project_id: str,
+    requested_by: int | None,
+    note: str = "",
+) -> dict | None:
+    from apps.installations.models import SigProject
+
+    try:
+        project = SigProject.objects.select_for_update().get(pk=project_id)
+    except SigProject.DoesNotExist:
+        return None
+
+    project.approval_status = "draft"
+    project.approval_requested_by = None
+    project.save(update_fields=["approval_status", "approval_requested_by", "updated_at"])
+
+    result = _project_to_dict(project)
+    requester_name = _sigtools_users_by_ids({requested_by}).get(requested_by, {}).get("name") if requested_by else None
+
+    transaction.on_commit(
+        lambda: _notify_project_approval_cancelled(project=result, requester_name=requester_name, note=note),
     )
     transaction.on_commit(lambda: _publish_project(result))
     return result
