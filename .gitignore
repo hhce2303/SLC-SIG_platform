@@ -35,3 +35,11 @@ build/
 
 # Logs
 *.log
+
+# Graphify
+.graphify/
+graphify-out/
+
+# Agents
+.agents/
+.claude
