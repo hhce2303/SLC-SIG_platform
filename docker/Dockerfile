@@ -47,7 +47,7 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh
 
 # Own everything to django user and ensure apps/ is writable (for chatbot code generation)
-RUN mkdir -p /app/staticfiles && \
+RUN mkdir -p /app/staticfiles /app/media && \
     chmod +x /entrypoint.sh && \
     chown -R django:django /app /entrypoint.sh && \
     chmod -R u+w /app/apps

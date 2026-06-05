@@ -46,9 +46,10 @@ DASHBOARD_KEYS = (
     "inst:sites_dashboard",
     "inst:project_sites",
     "inst:dispatch_progress",
+    "inst:ceo_dashboard",
 )
 
 
 def invalidate_dashboard() -> None:
-    """Invalida las tres lecturas cacheadas del dashboard de installations."""
+    """Invalida las lecturas cacheadas del dashboard de installations."""
     invalidate(*DASHBOARD_KEYS)

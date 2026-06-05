@@ -14,6 +14,7 @@ from django.views import View
 
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -66,7 +67,15 @@ from apps.installations.serializers import (
     SiteSwitchModelSerializer,
     SiteCreateSerializer,
     SiteCreateResponseSerializer,
+    SiteDetailSerializer,
+    SiteUpdateSerializer,
     SiteStatusEntrySerializer,
+    TopologyValidateRequestSerializer,
+    TopologyValidateResponseSerializer,
+    BOMResponseSerializer,
+    CeoDashboardResponseSerializer,
+    SiteIndoorMapSerializer,
+    SiteIndoorMapUploadSerializer,
     SyncPayloadSerializer,
     SyncResponseSerializer,
     UserSerializer,
@@ -171,7 +180,129 @@ class SiteDeviceCatalogView(APIView):
             item["installed"]         = d.installed if d else False
             item["installed_at"]      = d.installed_at.isoformat() if d and d.installed_at else None
             item["install_photo_url"] = d.install_photo_url if d else None
+            # Single derived field so the frontend stops guessing install state
+            # from device-name strings: installed → received → none.
+            item["physical_status"] = (
+                "installed" if (d and d.installed)
+                else "received" if (d and d.received_at)
+                else "none"
+            )
         return Response(data, status=status.HTTP_200_OK)
+
+
+class SiteTopologyValidateView(APIView):
+    """
+    POST /sites/<site_id>/topology/validate/
+
+    Validates a canvas network topology server-side: loop detection, PoE
+    budget per switch, uplink bandwidth and port counts. The request carries
+    the device specs and connections the frontend already holds in memory, so
+    the browser stops running graph traversal + PoE summation on every click
+    and only renders the errors this endpoint returns.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=TopologyValidateRequestSerializer,
+        responses={200: TopologyValidateResponseSerializer},
+    )
+    def post(self, request: Request, site_id: int) -> Response:
+        if not selectors.get_site_or_404(site_id):
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = TopologyValidateRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = services.validate_topology(
+            serializer.validated_data["devices"],
+            serializer.validated_data["connections"],
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class SiteBOMView(APIView):
+    """
+    GET /sites/<site_id>/bom/
+
+    Bill of Materials — device counts grouped by catalog entry via SQL
+    GROUP BY (cameras + other_devices). The frontend stops iterating thousands
+    of per-unit records in memory to build the hardware table.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: BOMResponseSerializer})
+    def get(self, request: Request, site_id: int) -> Response:
+        if not selectors.get_site_or_404(site_id):
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(selectors.get_site_bom(site_id), status=status.HTTP_200_OK)
+
+
+class CeoDashboardView(APIView):
+    """
+    GET /metrics/ceo-dashboard/
+
+    Company-wide project health analytics: per-project install progress,
+    schedule usage and a health semaphore (on_track / watch / behind_schedule)
+    plus an overall summary. Delay detection (keyword scan over logs/notes)
+    runs DB-side, so the CEO's browser never downloads every site nor runs
+    regexes over giant log fields.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: CeoDashboardResponseSerializer}, tags=["metrics"])
+    def get(self, request: Request) -> Response:
+        return Response(selectors.get_ceo_dashboard(), status=status.HTTP_200_OK)
+
+
+class SiteIndoorMapView(APIView):
+    """
+    GET  /sites/<site_id>/indoor-maps/  — list uploaded indoor floor-plans
+    POST /sites/<site_id>/indoor-maps/  — upload one (multipart/form-data)
+
+    The image is stored natively on MEDIA_ROOT and served by nginx at /media/,
+    so the frontend stops sending giant base64-encoded payloads.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @extend_schema(responses={200: SiteIndoorMapSerializer(many=True)}, tags=["indoor-maps"])
+    def get(self, request: Request, site_id: int) -> Response:
+        if not selectors.get_site_or_404(site_id):
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        maps = selectors.list_indoor_maps(site_id)
+        data = SiteIndoorMapSerializer(maps, many=True, context={"request": request}).data
+        return Response(data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=SiteIndoorMapUploadSerializer,
+        responses={201: SiteIndoorMapSerializer},
+        tags=["indoor-maps"],
+    )
+    def post(self, request: Request, site_id: int) -> Response:
+        if not selectors.get_site_or_404(site_id):
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        ser = SiteIndoorMapUploadSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        obj = services.create_indoor_map(
+            site_id,
+            ser.validated_data["image"],
+            label=ser.validated_data.get("label", ""),
+            uploaded_by=getattr(request.user, "id", None),
+        )
+        data = SiteIndoorMapSerializer(obj, context={"request": request}).data
+        return Response(data, status=status.HTTP_201_CREATED)
+
+
+class SiteIndoorMapDetailView(APIView):
+    """DELETE /sites/<site_id>/indoor-maps/<map_id>/ — remove an indoor map."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: MessageResponseSerializer}, tags=["indoor-maps"])
+    def delete(self, request: Request, site_id: int, map_id: int) -> Response:
+        if not services.delete_indoor_map(site_id, map_id):
+            return Response({"detail": "Indoor map not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"success": True, "message": "Indoor map deleted."},
+            status=status.HTTP_200_OK,
+        )
 
 
 class VMSCatalogView(APIView):
@@ -300,6 +431,22 @@ class SiteInventoryView(APIView):
 
 class SiteDetailView(APIView):
     permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=SiteUpdateSerializer, responses={200: SiteDetailSerializer})
+    def patch(self, request: Request, site_id: int) -> Response:
+        return self._update(request, site_id)
+
+    @extend_schema(request=SiteUpdateSerializer, responses={200: SiteDetailSerializer})
+    def put(self, request: Request, site_id: int) -> Response:
+        return self._update(request, site_id)
+
+    def _update(self, request: Request, site_id: int) -> Response:
+        serializer = SiteUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        updated = services.update_site(site_id, serializer.validated_data)
+        if updated is None:
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(updated, status=status.HTTP_200_OK)
 
     @extend_schema(responses={200: MessageResponseSerializer})
     def delete(self, request: Request, site_id: int) -> Response:
@@ -978,6 +1125,15 @@ class ProjectSiteInfoView(APIView):
         if updated is None:
             return Response({"detail": "Project site not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(updated, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=ProjectSiteInfoUpdateSerializer,
+        responses={200: ProjectSiteInfoSerializer},
+        tags=["project-sites"],
+    )
+    def put(self, request: Request, site_id: int) -> Response:
+        # Same partial-upsert semantics as PATCH; exposed so PUT no longer 405s.
+        return self.patch(request, site_id)
 
 
 class ItSiteTestView(APIView):

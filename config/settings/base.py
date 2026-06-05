@@ -218,6 +218,13 @@ STORAGES = {
 }
 
 # ---------------------------------------------------------------------------
+# Media (user-uploaded files — e.g. indoor floor-plan maps)
+# Stored on a local volume and served by nginx at /media/ in production.
+# ---------------------------------------------------------------------------
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
+# ---------------------------------------------------------------------------
 # Default PK
 # ---------------------------------------------------------------------------
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

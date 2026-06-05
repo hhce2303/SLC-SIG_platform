@@ -1216,16 +1216,61 @@ def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
     }
 
 
+def _serial_in_use(serial: str, exclude_prefix: str, exclude_pk: int) -> bool:
+    """
+    True if `serial` is already assigned to another *active* device
+    (cameras or other_devices), excluding the device being updated.
+
+    sigtools_beta is a shared legacy DB with soft-deletes, so uniqueness is
+    enforced in the app (→ 409) rather than with a hard UNIQUE constraint that
+    could clash with historical / soft-deleted rows. All values parameterized.
+    """
+    with connections[_DB].cursor() as cur:
+        if exclude_prefix == "cam":
+            cur.execute(
+                "SELECT 1 FROM cameras WHERE serial = %s AND deleted_at IS NULL AND id <> %s LIMIT 1",
+                [serial, exclude_pk],
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM cameras WHERE serial = %s AND deleted_at IS NULL LIMIT 1",
+                [serial],
+            )
+        if cur.fetchone():
+            return True
+
+        if exclude_prefix != "cam":
+            cur.execute(
+                "SELECT 1 FROM other_devices WHERE serial = %s AND deleted_at IS NULL AND id <> %s LIMIT 1",
+                [serial, exclude_pk],
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM other_devices WHERE serial = %s AND deleted_at IS NULL LIMIT 1",
+                [serial],
+            )
+        return cur.fetchone() is not None
+
+
 def update_device_serial(site_id: int, device_id: str, serial: str) -> None:
     """
     Update serial on a catalog device identified by the string device_id
-    (e.g. 'cam-12', 'switch-5').  Raises ValueError if not found.
+    (e.g. 'cam-12', 'switch-5').
+
+    Raises:
+        ValueError    — device_id malformed or device not found for the site.
+        ConflictError — serial already assigned to another active device (409).
     """
     prefix, _, raw_id = device_id.partition("-")
     try:
         pk = int(raw_id)
     except ValueError:
         raise ValueError(f"Invalid device_id format: {device_id!r}")
+
+    # Serial uniqueness (app-level → 409). Skip the check for empty serials
+    # (clearing a serial is allowed and many devices legitimately have none).
+    if serial and serial.strip() and _serial_in_use(serial, prefix, pk):
+        raise ConflictError(f"Serial '{serial}' is already assigned to another device.")
 
     with connections[_DB].cursor() as cur:
         if prefix == "cam":
@@ -1252,6 +1297,91 @@ def update_device_serial(site_id: int, device_id: str, serial: str) -> None:
             raise ValueError(f"Device {device_id!r} not found for site {site_id}")
 
     _publish_device_event("site_device_updated", site_id, device_id, serial=serial)
+
+
+# Columns on sigtools_beta.sites the API is allowed to edit. Used as an
+# allowlist so column names are never taken from user input (values stay
+# parameterized).
+_SITE_EDITABLE_COLUMNS = (
+    "name", "ip_address", "city", "state_code", "country_code",
+    "address", "timezone", "monitored", "maintenance",
+    "receive_notifications", "installation_date",
+)
+
+
+def update_site(site_id: int, data: dict) -> dict | None:
+    """
+    Update editable core fields on a sigtools_beta.sites row (raw SQL — the
+    Site model is unmanaged/read-only). Only fields present in `data` and
+    whitelisted in _SITE_EDITABLE_COLUMNS are written.
+
+    Returns the updated site dict (SiteDetailSerializer shape), or None when
+    the site does not exist / is soft-deleted.
+    """
+    from apps.installations import selectors
+
+    # Existence check up front: MySQL UPDATE rowcount reflects *changed* rows,
+    # so a no-op update (identical values) returns 0 even though the row exists.
+    if selectors.get_site_or_404(site_id) is None:
+        return None
+
+    updates = {col: data[col] for col in _SITE_EDITABLE_COLUMNS if col in data}
+    if updates:
+        set_clause = ", ".join(f"{col} = %s" for col in updates)
+        params = list(updates.values()) + [site_id]
+        with connections[_DB].cursor() as cur:
+            cur.execute(
+                f"UPDATE sites SET {set_clause}, updated_at = NOW() "
+                "WHERE id = %s AND deleted_at IS NULL",
+                params,
+            )
+        cu.invalidate_dashboard()
+        _rt_publish(CH_INSTALLATIONS, "site_updated", {"site_id": site_id, **updates})
+
+    return selectors.get_site_detail(site_id)
+
+
+def validate_topology(devices, connections) -> dict:
+    """
+    Validate a canvas network topology: loop detection + PoE budget + uplink
+    bandwidth + port counts. Pure computation (no DB) — see
+    apps.installations.topology for the algorithm and request contract.
+    """
+    from apps.installations import topology
+
+    return topology.validate(list(devices), list(connections))
+
+
+def create_indoor_map(site_id: int, image_file, label: str = "", uploaded_by: int | None = None):
+    """
+    Store an uploaded indoor floor-plan on MEDIA_ROOT and return the created
+    SiteIndoorMap row. The FileField writes the file natively (no base64).
+    """
+    from apps.installations.models import SiteIndoorMap
+
+    return SiteIndoorMap.objects.create(
+        site_id=site_id,
+        label=label or "",
+        image=image_file,
+        content_type=getattr(image_file, "content_type", "") or "",
+        size_bytes=getattr(image_file, "size", 0) or 0,
+        uploaded_by=uploaded_by,
+    )
+
+
+def delete_indoor_map(site_id: int, map_id: int) -> bool:
+    """Delete an indoor map (row + file on disk). False if not found."""
+    from apps.installations.models import SiteIndoorMap
+
+    obj = SiteIndoorMap.objects.filter(site_id=site_id, pk=map_id).first()
+    if obj is None:
+        return False
+    try:
+        obj.image.delete(save=False)  # remove the file from MEDIA_ROOT
+    except Exception as exc:
+        logger.warning("[indoor-map] file delete failed for %s: %s", map_id, exc)
+    obj.delete()
+    return True
 
 
 def delete_site(site_id: int) -> bool:

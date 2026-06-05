@@ -34,6 +34,10 @@ urlpatterns = [
     path("sites/<int:site_id>/status/", views.SiteStatusView.as_view(), name="site-status"),
     path("sites/<int:site_id>/inventory/", views.SiteInventoryView.as_view(), name="site-inventory"),
     path("sites/<int:site_id>/catalog/", views.SiteDeviceCatalogView.as_view(), name="site-device-catalog"),
+    path("sites/<int:site_id>/topology/validate/", views.SiteTopologyValidateView.as_view(), name="site-topology-validate"),
+    path("sites/<int:site_id>/bom/", views.SiteBOMView.as_view(), name="site-bom"),
+    path("sites/<int:site_id>/indoor-maps/", views.SiteIndoorMapView.as_view(), name="site-indoor-maps"),
+    path("sites/<int:site_id>/indoor-maps/<int:map_id>/", views.SiteIndoorMapDetailView.as_view(), name="site-indoor-map-detail"),
 
     # --- Projects (Installations) ---
     path("projects/", views.ProjectListView.as_view(), name="project-list"),
@@ -76,6 +80,9 @@ urlpatterns = [
 
     # --- Dashboard init (unified first-load payload) ---
     path("dashboard-init/", views.DashboardInitView.as_view(), name="dashboard-init"),
+
+    # --- Metrics / analytics ---
+    path("metrics/ceo-dashboard/", views.CeoDashboardView.as_view(), name="metrics-ceo-dashboard"),
 
     # --- Inventory export (canvas → DB) ---
     path("inventory/export/", views.InventoryExportView.as_view(), name="inventory-export"),
