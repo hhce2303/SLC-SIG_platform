@@ -11,6 +11,7 @@ venv/
 # Environment
 .env
 !.env.example
+docker/.env
 
 # Django
 db.sqlite3
@@ -35,6 +36,9 @@ build/
 
 # Logs
 *.log
+
+# DB backups
+backups/
 
 # Graphify
 .graphify/

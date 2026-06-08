@@ -1,0 +1,7 @@
+# Local development port overrides.
+# Docker Compose reads NGINX_PORT from docker/.env at parse time.
+# This file documents the intent; the actual value comes from docker/.env
+# DO NOT commit docker/.env — it is gitignored.
+#
+# Production deploy: docker compose -f docker-compose.yml up -d
+#   (no override file, NGINX_PORT defaults to 80 via docker-compose.yml)
