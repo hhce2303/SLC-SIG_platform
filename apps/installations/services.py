@@ -338,12 +338,12 @@ def create_site_with_installation(data: dict) -> dict:
     _PROJECT_OWNER_DEFAULT = None
 
     with transaction.atomic(using=_DB):
-        # 1. Resolve Active status ID
+        # 1. Resolve Pending status ID
         with connections[_DB].cursor() as cur:
-            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Active' LIMIT 1")
+            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
             row = cur.fetchone()
             if row is None:
-                raise ValueError("Active status not found in inst_statuses")
+                raise ValueError("Pending status not found in inst_statuses")
             active_status_id: int = row[0]
 
         # 2. Insert site
@@ -542,11 +542,12 @@ def create_project_site_with_installation(data: dict) -> dict:
     _PROJECT_OWNER_DEFAULT = None
 
     with transaction.atomic(using=_DB):
+        # 1. Resolve Pending status ID
         with connections[_DB].cursor() as cur:
-            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Active' LIMIT 1")
+            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
             row = cur.fetchone()
             if row is None:
-                raise ValueError("Active status not found in inst_statuses")
+                raise ValueError("Pending status not found in inst_statuses")
             active_status_id: int = row[0]
 
         project_site_sql = """
@@ -746,11 +747,12 @@ def create_project_site_with_installation(data: dict) -> dict:
     _STAGING_SITE_STATUS = 5
 
     with transaction.atomic(using=_DB):
+        # 1. Resolve Pending status ID
         with connections[_DB].cursor() as cur:
-            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Active' LIMIT 1")
+            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
             row = cur.fetchone()
             if row is None:
-                raise ValueError("Active status not found in inst_statuses")
+                raise ValueError("Pending status not found in inst_statuses")
             active_status_id: int = row[0]
 
         # 1. Insert staging review record

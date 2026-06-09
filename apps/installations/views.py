@@ -432,6 +432,13 @@ class SiteInventoryView(APIView):
 class SiteDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses={200: SiteDetailSerializer})
+    def get(self, request: Request, site_id: int) -> Response:
+        site_data = selectors.get_site_detail(site_id)
+        if site_data is None:
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(site_data, status=status.HTTP_200_OK)
+
     @extend_schema(request=SiteUpdateSerializer, responses={200: SiteDetailSerializer})
     def patch(self, request: Request, site_id: int) -> Response:
         return self._update(request, site_id)
