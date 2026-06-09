@@ -1048,6 +1048,21 @@ _EXPORT_OTHER_SQL = """
         updated_at     = NOW()
 """
 
+_EXPORT_CAMERA_UPDATE_SQL = """
+    UPDATE cameras
+    SET canvas_instance_id = %s,
+        network_device_id = %s,
+        updated_at = NOW()
+    WHERE id = %s AND installation_id = %s
+"""
+
+_EXPORT_OTHER_UPDATE_SQL = """
+    UPDATE other_devices
+    SET canvas_instance_id = %s,
+        updated_at = NOW()
+    WHERE id = %s AND installation_id = %s
+"""
+
 _EXPORT_CAMERA_VIEW_UPDATE_SQL = """
     UPDATE views v
     JOIN cameras c
@@ -1104,40 +1119,6 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
 
     Returns: { success, site_id, installation_id, created_cameras, created_other_devices, skipped }
     """
-    all_devices = [*payload.get("devices", []), *payload.get("indoorDevices", [])]
-    camera_params: list[list] = []
-    camera_view_params: list[list] = []
-    other_params: list[list] = []
-    skipped: list[dict] = []
-
-    # Validación por-item en Python (sin tocar la BD) — acumula skipped.
-    for dev in all_devices:
-        instance_id = dev.get("instanceId") or dev.get("id")
-        if not instance_id:
-            skipped.append({"reason": "missing instanceId", "dev": dict(dev)})
-            continue
-
-        catalog_raw = dev.get("catalogoId")
-        if not catalog_raw:
-            skipped.append({"reason": "missing catalogoId", "instanceId": instance_id})
-            continue
-        try:
-            catalog_id = int(catalog_raw)
-        except (ValueError, TypeError):
-            skipped.append({"reason": f"catalogoId not int: {catalog_raw!r}", "instanceId": instance_id})
-            continue
-
-        category = dev.get("category", "other")
-        network_device_id = dev.get("networkDeviceId") or None
-        view_name = dev.get("view_name")
-        params = [installation_id, catalog_id, network_device_id, instance_id]
-        if category == "camera":
-            camera_params.append(params)
-            if view_name:
-                camera_view_params.append([view_name, installation_id, instance_id, installation_id])
-        else:
-            other_params.append(params)
-
     with transaction.atomic(using=_DB):
         with connections[_DB].cursor() as cur:
             if site_id and not installation_id:
@@ -1161,6 +1142,58 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
                 raise ValueError(f"Installation {installation_id} not found.")
             site_id = row[0]
 
+            all_devices = [*payload.get("devices", []), *payload.get("indoorDevices", [])]
+            camera_params: list[list] = []
+            camera_update_params: list[list] = []
+            camera_view_params: list[list] = []
+            other_params: list[list] = []
+            other_update_params: list[list] = []
+            skipped: list[dict] = []
+
+            # Validación por-item en Python (sin tocar la BD) — acumula skipped.
+            for dev in all_devices:
+                instance_id = dev.get("instanceId") or dev.get("id")
+                if not instance_id:
+                    skipped.append({"reason": "missing instanceId", "dev": dict(dev)})
+                    continue
+
+                catalog_raw = dev.get("catalogoId")
+                inventory_id = dev.get("inventory_id")
+                
+                if not catalog_raw and not inventory_id:
+                    skipped.append({"reason": "missing catalogoId or inventory_id", "instanceId": instance_id})
+                    continue
+                
+                catalog_id = None
+                if catalog_raw is not None:
+                    try:
+                        catalog_id = int(catalog_raw)
+                    except (ValueError, TypeError):
+                        skipped.append({"reason": f"catalogoId not int: {catalog_raw!r}", "instanceId": instance_id})
+                        continue
+
+                category = dev.get("category", "other")
+                network_device_id = dev.get("networkDeviceId") or None
+                view_name = dev.get("view_name")
+                
+                if inventory_id is not None:
+                    # UPDATE existing physical device
+                    if category == "camera":
+                        camera_update_params.append([instance_id, network_device_id, inventory_id, installation_id])
+                        if view_name:
+                            camera_view_params.append([view_name, installation_id, instance_id, installation_id])
+                    else:
+                        other_update_params.append([instance_id, inventory_id, installation_id])
+                else:
+                    # INSERT new generic device
+                    params = [installation_id, catalog_id, network_device_id, instance_id]
+                    if category == "camera":
+                        camera_params.append(params)
+                        if view_name:
+                            camera_view_params.append([view_name, installation_id, instance_id, installation_id])
+                    else:
+                        other_params.append(params)
+
             # Remove orphan rows that have no canvas_instance_id (pre-fix records)
             # so they don't accumulate alongside the properly-keyed UPSERT rows.
             cur.execute(
@@ -1173,13 +1206,15 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
             )
 
             logger.warning(
-                "[export] installation=%s site=%s cameras=%s others=%s skipped=%s",
-                installation_id, site_id, len(camera_params), len(other_params), len(skipped),
+                "[export] installation=%s site=%s cameras(ins=%s upd=%s) others(ins=%s upd=%s) skipped=%s",
+                installation_id, site_id, len(camera_params), len(camera_update_params), len(other_params), len(other_update_params), len(skipped),
             )
 
             try:
                 if camera_params:
                     cur.executemany(_EXPORT_CAMERA_SQL, camera_params)
+                if camera_update_params:
+                    cur.executemany(_EXPORT_CAMERA_UPDATE_SQL, camera_update_params)
                 if camera_view_params:
                     cur.executemany(_EXPORT_CAMERA_VIEW_UPDATE_SQL, camera_view_params)
                     cur.executemany(
@@ -1188,6 +1223,8 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
                     )
                 if other_params:
                     cur.executemany(_EXPORT_OTHER_SQL, other_params)
+                if other_update_params:
+                    cur.executemany(_EXPORT_OTHER_UPDATE_SQL, other_update_params)
             except Exception as exc:
                 # El atomic hace rollback automático al propagar — sin estado parcial.
                 logger.exception("[export] batch INSERT falló (installation=%s)", installation_id)
