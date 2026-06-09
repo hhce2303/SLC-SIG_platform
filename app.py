@@ -12,6 +12,8 @@ Usage:
 import json
 import os
 import queue
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -20,7 +22,7 @@ from pathlib import Path
 from typing import Optional, List
 
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext
 
 # ── Theming ──────────────────────────────────────────────────────────────────
 C = {
@@ -38,6 +40,7 @@ C = {
 }
 
 SERVICES = ["redis", "web", "nginx", "poller", "sigtools-db"]
+REPO_ROOT = Path(__file__).resolve().parent
 
 # ── Docker Compose helpers ────────────────────────────────────────────────────
 def _popen_kwargs() -> dict:
@@ -172,6 +175,7 @@ class PlatformApp:
             ("Restart",       self._do_restart,         C["yellow"]),
             ("Nginx Restart", self._do_nginx_restart,   C["yellow"]),
             ("Health Status", self._do_health,          C["accent"]),
+            ("Seed DB",       self._do_seed_db,         C["yellow"]),
             ("Logs",          self._do_logs,            C["dim"]),
             ("Down",          self._do_down,            C["red"]),
         ]
@@ -324,6 +328,100 @@ class PlatformApp:
             except OSError:
                 pass
             self._log_line("Stopped by user.", "warn")
+
+    # ── Seed DB ───────────────────────────────────────────────────────────────
+    def _load_env(self) -> dict:
+        """Parse .env files into a dict. docker/.env overrides root .env for Docker-specific vars."""
+        env = {}
+        for env_file in [REPO_ROOT / ".env", REPO_ROOT / "docker" / ".env"]:
+            if env_file.exists():
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, _, val = line.partition("=")
+                        env[key.strip()] = val.strip()
+        return env
+
+    def _do_seed_db(self):
+        sql_path_str = filedialog.askopenfilename(
+            title="Seleccionar snapshot SQL para inyectar en sigtools-db",
+            filetypes=[("SQL files", "*.sql"), ("All files", "*.*")],
+            initialdir=str(Path.home()),
+        )
+        if not sql_path_str:
+            return  # usuario canceló
+
+        sql_path = Path(sql_path_str)
+        size_kb  = sql_path.stat().st_size // 1024
+
+        if not messagebox.askyesno(
+            "Inyectar SQL en sigtools-db",
+            f"Archivo:  {sql_path.name}  ({size_kb:,} KB)\n\n"
+            "Se inyectará en el contenedor local sigtools-db.\n"
+            "Los datos actuales del contenedor serán reemplazados.\n\n"
+            "¿Continuar?"
+        ):
+            return
+
+        env = self._load_env()
+        local_root_pass = env.get("LOCAL_SIGTOOLS_ROOT_PASSWORD", "localroot")
+
+        def run():
+            self._log_line(f"Inyectando {sql_path.name} ({size_kb:,} KB) en sigtools-db ...", "info")
+
+            inject_cmd = self.docker._base_cmd() + [
+                "exec", "-T",
+                "-e", f"MYSQL_PWD={local_root_pass}",
+                "sigtools-db",
+                "mysql", "-uroot",
+            ]
+
+            # MySQL 8.0 no permite DEFAULT en columnas TEXT/BLOB/JSON/GEOMETRY (error 1101).
+            # El dump viene de un servidor 5.x/8.0 permisivo — filtramos esas cláusulas en stream.
+            _text_default = re.compile(
+                r"(\b(?:tiny|medium|long)?(?:text|blob)\b|\bjson\b|\bgeometry\b)"
+                r"([^,\n]*?)"
+                r"\s+DEFAULT\s+(?:'[^']*'|\"[^\"]*\")",
+                re.IGNORECASE,
+            )
+
+            proc = subprocess.Popen(
+                inject_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding="utf-8", errors="replace",
+                **_popen_kwargs()
+            )
+            self._proc = proc
+
+            def _feed():
+                try:
+                    with open(sql_path, "r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            proc.stdin.write(_text_default.sub(r"\1\2", line))
+                except Exception as exc:
+                    self._log_line(f"Feed error: {exc}", "error")
+                finally:
+                    proc.stdin.close()
+
+            feed_thread = threading.Thread(target=_feed, daemon=True)
+            feed_thread.start()
+
+            for line in proc.stdout:
+                line = line.rstrip()
+                tag = "error" if "error" in line.lower() else "dim"
+                self._log_line(line, tag)
+
+            proc.wait()
+            feed_thread.join()
+
+            if proc.returncode == 0:
+                self._log_line(f"✓ sigtools-db poblada desde {sql_path.name}", "success")
+            else:
+                self._log_line(f"✗ Inyección fallida (exit {proc.returncode})", "error")
+                self._log_line("  Verifica que sigtools-db esté corriendo (botón Up).", "warn")
+
+        self._run_async(run)
 
     # ── Status polling ────────────────────────────────────────────────────────
     def _poll_status(self):

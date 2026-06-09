@@ -27,18 +27,16 @@ services:
       MYSQL_USER:          ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
       MYSQL_PASSWORD:      ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
     ports:
-      - "${LOCAL_SIGTOOLS_DB_PORT:-3307}:3306"   # 3307 on host → avoids conflict with prod/other local MySQL
+      - "${LOCAL_SIGTOOLS_DB_PORT:-3308}:3306"   # 3308 on host → 3307 reserved for inventory_mysql
     volumes:
       - sigtools_db_data:/var/lib/mysql
       - ./init-db:/docker-entrypoint-initdb.d:ro  # optional SQL seed scripts
     healthcheck:
-      test: >
-        CMD mysqladmin ping -h localhost -u root
-        -p${LOCAL_SIGTOOLS_ROOT_PASSWORD:-localroot}
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s   # MySQL needs time on cold start
+      start_period: 30s
 
   # ── Override: web depends on local DB being healthy ───────────
   web:

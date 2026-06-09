@@ -33,7 +33,7 @@ LOCAL_DEFAULTS = {
     "LOCAL_SIGTOOLS_DB_USER":     "sigtools_user",
     "LOCAL_SIGTOOLS_DB_PASSWORD": "sigtools_pass",
     "LOCAL_SIGTOOLS_ROOT_PASSWORD": "localroot",
-    "LOCAL_SIGTOOLS_DB_PORT":     "3307",
+    "LOCAL_SIGTOOLS_DB_PORT":     "3308",
     "REDIS_URL":            "redis://redis:6379/0",
     "DOCKER_CONTAINER_NAME": "SIGplatform-web",
     "DJANGO_ENV":           "production",

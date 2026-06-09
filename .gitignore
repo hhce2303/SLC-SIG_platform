@@ -47,3 +47,8 @@ graphify-out/
 # Agents
 .agents/
 .claude
+
+# DB snapshots — contain production data, never commit
+export_database_complete.py
+sigtools_beta.sql
+*.sql.bak
