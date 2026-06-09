@@ -15,4 +15,6 @@ SECURE_HSTS_PRELOAD = True
 SIGTOOLS_COOKIE_SECURE = True
 # SameSite=Lax works because installations.sig.systems and api.sig.systems share the same eTLD+1
 SIGTOOLS_COOKIE_SAMESITE = "Lax"
-SIGTOOLS_COOKIE_DOMAIN = ".sig.systems"
+SIGTOOLS_COOKIE_DOMAIN = env("SIGTOOLS_COOKIE_DOMAIN", default=".sig.systems")
+if SIGTOOLS_COOKIE_DOMAIN == "":
+    SIGTOOLS_COOKIE_DOMAIN = None

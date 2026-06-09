@@ -45,8 +45,11 @@ services:
         condition: service_healthy
     environment:
       # Point Django at the local container by service name (Docker internal DNS)
+      SIGTOOLS_COOKIE_DOMAIN: "localhost"
       SIGTOOLS_DB_HOST: sigtools-db
       SIGTOOLS_DB_PORT: "3306"
+      SIGTOOLS_DB_USER: ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
+      SIGTOOLS_DB_PASSWORD: ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
 
   # ── Override: poller depends on local DB being healthy ────────
   poller:
@@ -56,6 +59,8 @@ services:
     environment:
       SIGTOOLS_DB_HOST: sigtools-db
       SIGTOOLS_DB_PORT: "3306"
+      SIGTOOLS_DB_USER: ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
+      SIGTOOLS_DB_PASSWORD: ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
 
 volumes:
   sigtools_db_data:
