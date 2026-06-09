@@ -5,12 +5,16 @@
       "source": "sig-systems/agent-skills",
       "sourceType": "github",
       "computedHash": "d1c8e5b9a0c3f1e5b2a7c8d9e6f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6"
-    }},
+    },
     "supabase-postgres-best-practices": {
       "source": "supabase/agent-skills",
       "sourceType": "github",
       "computedHash": "abf015aafed757edaf2a329299fc106abebdc53bc7f089e92e1f762ed3d8f117"
+    },
+    "docker-django-ops": {
+      "source": ".claude/skills/docker-django-ops",
+      "sourceType": "local",
+      "computedHash": "docker-django-ops-local-v1"
     }
   }
-
-
+}

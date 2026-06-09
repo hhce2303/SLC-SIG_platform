@@ -1,0 +1,3 @@
+# Place .sql seed files here. They run in filename order on first MySQL container start.
+# Example: 01_create_tables.sql, 02_seed_data.sql
+# This directory is git-tracked but its .sql contents should NOT be committed (add to .gitignore if needed).
