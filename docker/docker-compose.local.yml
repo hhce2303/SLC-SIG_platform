@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────
+#  SIG Platform — Local Development Stack Overlay
+#
+#  Extends docker-compose.yml with a pinned local MySQL instance
+#  that mirrors the production sigtools_beta database.
+#
+#  Usage (via app.py, which wires this automatically):
+#    docker compose \
+#      -f docker/docker-compose.yml \
+#      -f docker/docker-compose.local.yml \
+#      up -d
+#
+#  DO NOT use as a standalone file.
+#  DO NOT commit database volume data.
+# ─────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Local MySQL mirror for sigtools_beta ──────────────────────
+  sigtools-db:
+    image: mysql:8.0.32           # pinned — matches production version
+    container_name: SIGplatform-sigtools-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${LOCAL_SIGTOOLS_ROOT_PASSWORD:-localroot}
+      MYSQL_DATABASE:      ${LOCAL_SIGTOOLS_DB_NAME:-sigtools_beta}
+      MYSQL_USER:          ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
+      MYSQL_PASSWORD:      ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
+    ports:
+      - "${LOCAL_SIGTOOLS_DB_PORT:-3307}:3306"   # 3307 on host → avoids conflict with prod/other local MySQL
+    volumes:
+      - sigtools_db_data:/var/lib/mysql
+      - ./init-db:/docker-entrypoint-initdb.d:ro  # optional SQL seed scripts
+    healthcheck:
+      test: >
+        CMD mysqladmin ping -h localhost -u root
+        -p${LOCAL_SIGTOOLS_ROOT_PASSWORD:-localroot}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s   # MySQL needs time on cold start
+
+  # ── Override: web depends on local DB being healthy ───────────
+  web:
+    depends_on:
+      sigtools-db:
+        condition: service_healthy
+    environment:
+      # Point Django at the local container by service name (Docker internal DNS)
+      SIGTOOLS_DB_HOST: sigtools-db
+      SIGTOOLS_DB_PORT: "3306"
+
+  # ── Override: poller depends on local DB being healthy ────────
+  poller:
+    depends_on:
+      sigtools-db:
+        condition: service_healthy
+    environment:
+      SIGTOOLS_DB_HOST: sigtools-db
+      SIGTOOLS_DB_PORT: "3306"
+
+volumes:
+  sigtools_db_data:
