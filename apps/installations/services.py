@@ -1094,7 +1094,7 @@ _EXPORT_CAMERA_VIEW_INSERT_SQL = """
 """
 
 
-def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
+def export_inventory_from_canvas(payload: dict, installation_id: int | None = None, site_id: int | None = None) -> dict:
     """
     Takes the full canvas snapshot and creates cameras / other_devices for the
     installation.
@@ -1140,6 +1140,18 @@ def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
 
     with transaction.atomic(using=_DB):
         with connections[_DB].cursor() as cur:
+            if site_id and not installation_id:
+                cur.execute(
+                    "SELECT id FROM installations WHERE site_id = %s AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+                    [site_id],
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError(f"No active installation found for site {site_id}.")
+                installation_id = row[0]
+            elif not installation_id:
+                raise ValueError("Either installation_id or site_id is required.")
+
             cur.execute(
                 "SELECT site_id FROM installations WHERE id = %s AND deleted_at IS NULL",
                 [installation_id],

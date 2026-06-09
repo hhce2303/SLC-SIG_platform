@@ -1020,8 +1020,9 @@ class InventoryExportView(APIView):
         d = serializer.validated_data
         try:
             result = services.export_inventory_from_canvas(
-                installation_id=d["installation_id"],
                 payload=d,
+                installation_id=d.get("installation_id"),
+                site_id=d.get("site_id"),
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

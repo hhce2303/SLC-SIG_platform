@@ -495,7 +495,8 @@ class DeviceExportSerializer(serializers.Serializer):
 
 
 class InventoryExportSerializer(serializers.Serializer):
-    installation_id = serializers.IntegerField()
+    site_id = serializers.IntegerField(required=False, allow_null=True)
+    installation_id = serializers.IntegerField(required=False, allow_null=True)
     sitio = SitioExportSerializer(required=False, allow_null=True)
     projectName = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     devices = DeviceExportSerializer(many=True, default=list)
