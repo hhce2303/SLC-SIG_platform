@@ -4,10 +4,16 @@ from django.http import JsonResponse
 from django.urls import include, path
 from drf_spectacular.views import (
     SpectacularAPIView,
+    SpectacularRedocView,
     SpectacularSwaggerView,
 )
 
 from config.admin_sites import installations_admin, inventory_admin, schedules_admin, sigtools_admin
+
+# Vistas de OpenAPI sin restricción de auth para que funcionen en local y producción
+_SCHEMA_VIEW = SpectacularAPIView.as_view(permission_classes=[])
+_SWAGGER_VIEW = SpectacularSwaggerView.as_view(url_name="schema", permission_classes=[])
+_REDOC_VIEW = SpectacularRedocView.as_view(url_name="schema", permission_classes=[])
 
 
 def health_check(request):
@@ -41,9 +47,10 @@ urlpatterns = [
     path("admin/installations/", installations_admin.urls),
     path("admin/", admin.site.urls),
     path("api/v1/", include(api_v1)),
-    # OpenAPI
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    # OpenAPI — accesibles sin autenticación tanto en local como en producción
+    path("api/schema/", _SCHEMA_VIEW, name="schema"),
+    path("api/docs/", _SWAGGER_VIEW, name="swagger-ui"),
+    path("api/redoc/", _REDOC_VIEW, name="redoc"),
 ]
 
 if settings.DEBUG:

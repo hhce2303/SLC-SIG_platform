@@ -327,11 +327,204 @@ MS_GRAPH_SENDER = env("MS_GRAPH_SENDER", default="")
 # drf-spectacular (OpenAPI)
 # ---------------------------------------------------------------------------
 SPECTACULAR_SETTINGS = {
-    "TITLE": "Daily Log API",
-    "DESCRIPTION": "REST API for Daily Log System - SIG Systems, Inc.",
+    "TITLE": "SIG & SLC Platform API",
+    "DESCRIPTION": (
+        "REST API de la Plataforma SIG & SLC — SIG Systems, Inc.\n\n"
+        "---\n\n"
+        "## Autenticación\n\n"
+        "La API soporta **dos esquemas de autenticación** independientes:\n\n"
+        "### 1 · JWT Bearer — Daily Log / Mobile / SPA\n"
+        "Usado por el Daily Log y las apps de scheduling.\n\n"
+        "```\n"
+        "Authorization: Bearer <access_token>\n"
+        "```\n\n"
+        "1. Obtén el par de tokens con `POST /api/v1/auth/login/`.\n"
+        "2. Incluye el `access_token` en el header `Authorization: Bearer …` de cada petición.\n"
+        "3. Cuando el access token expire (60 min) renuévalo con `POST /api/v1/auth/token/refresh/` "
+        "enviando el `refresh_token` (válido 7 días). Se devuelve un nuevo par y el refresh anterior "
+        "queda invalidado (rotación automática).\n\n"
+        "### 2 · Cookie SIGTools — Portal Web / LDAP\n"
+        "Usado por el portal web `installations.sig.systems` e `inventory.sig.systems`.\n\n"
+        "1. Llama a `POST /api/v1/web-auth/login/` con credenciales de Active Directory.\n"
+        "2. El servidor setea la cookie `sig_token` (HttpOnly, Secure en producción, SameSite=Lax, "
+        "expira en 8 h).\n"
+        "3. El browser la incluye automáticamente en peticiones al mismo dominio (`*.sig.systems`).\n"
+        "4. Cierra sesión con `POST /api/v1/web-auth/logout/` (revoca el token actual) o "
+        "`POST /api/v1/web-auth/logout-all/` (revoca todos los tokens del usuario).\n\n"
+        "---\n\n"
+        "## Paginación\n\n"
+        "Todos los endpoints de listado devuelven la estructura estándar:\n\n"
+        "```json\n"
+        '{\n  "count": 150,\n  "next": "https://api.sig.systems/api/v1/...?page=2",\n'
+        '  "previous": null,\n  "results": [...]\n}\n'
+        "```\n\n"
+        "Tamaño de página por defecto: **50 registros**. Navega con `?page=N`.\n\n"
+        "---\n\n"
+        "## Streams de Tiempo Real (SSE)\n\n"
+        "Dos endpoints entregan eventos SSE via Redis pub/sub:\n\n"
+        "| Endpoint | Canal Redis | Descripción |\n"
+        "|----------|-------------|-------------|\n"
+        "| `GET /api/v1/inventory/stream/` | `rt:inventory` | Cambios en artículos de inventario |\n"
+        "| `GET /api/v1/installations/stream/` | `rt:installations` | Actualizaciones de proyectos |\n\n"
+        "Conéctate con `EventSource` desde JavaScript. La autenticación se pasa vía cookie o header.\n\n"
+        "---\n\n"
+        "## Manejo de Errores\n\n"
+        "| Código | Significado |\n"
+        "|--------|-------------|\n"
+        "| `400` | Datos de entrada inválidos — el cuerpo incluye detalle de los campos |\n"
+        "| `401` | No autenticado — token ausente o expirado |\n"
+        "| `403` | Sin permiso — autenticado pero sin el rol requerido |\n"
+        "| `404` | Recurso no encontrado |\n"
+        "| `409` | Conflicto — violación de unicidad |\n"
+        "| `500` | Error interno del servidor |"
+    ),
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "SCHEMA_PATH_PREFIX": "/api/v[0-9]",
+    # Servidores disponibles — el front puede seleccionar entre local y producción
+    "SERVERS": [
+        {"url": "http://localhost", "description": "Desarrollo local (nginx → puerto 80)"},
+        {"url": "https://api.sig.systems", "description": "Producción"},
+    ],
+    # Tags — agrupan los endpoints en el Swagger UI
+    "TAGS": [
+        {
+            "name": "Health",
+            "description": "Health check del servidor. No requiere autenticación.",
+        },
+        {
+            "name": "Auth",
+            "description": (
+                "Autenticación JWT para el Daily Log y apps móviles/SPA.\n\n"
+                "Flujo típico:\n"
+                "1. `POST /api/v1/auth/login/` → obtén `access` y `refresh` tokens.\n"
+                "2. Incluye `Authorization: Bearer <access>` en cada request.\n"
+                "3. `POST /api/v1/auth/token/refresh/` cuando el access expire.\n"
+                "4. `POST /api/v1/auth/logout/` para invalidar la sesión."
+            ),
+        },
+        {
+            "name": "Web Auth",
+            "description": (
+                "Autenticación basada en cookie LDAP/Active Directory para el portal web.\n\n"
+                "La cookie `sig_token` se setea al hacer login y se incluye automáticamente "
+                "en peticiones al dominio `*.sig.systems`."
+            ),
+        },
+        {
+            "name": "Platform",
+            "description": (
+                "Módulo de plataforma: login por número de estación, configuración de "
+                "estación y catálogo de herramientas disponibles."
+            ),
+        },
+        {
+            "name": "Catalogs",
+            "description": "Catálogos de solo lectura: sitios disponibles y tipos de actividad.",
+        },
+        {
+            "name": "Events",
+            "description": (
+                "Registro de eventos del Daily Log. Cada evento pertenece a un turno y un sitio.\n\n"
+                "- `GET /api/v1/events/` — lista eventos del turno activo (filtrado por `site_id`, `date`).\n"
+                "- `POST /api/v1/events/` — crea un nuevo evento de log."
+            ),
+        },
+        {
+            "name": "Notifications",
+            "description": (
+                "Especiales de supervisor (avisos que requieren confirmación).\n\n"
+                "Solo accesible con el rol `Supervisor`. "
+                "`PATCH /api/v1/specials/{id}/mark/` marca un especial como leído/procesado."
+            ),
+        },
+        {
+            "name": "Reports",
+            "description": "Reportes de despacho policial — listado de incidentes por sitio y fecha.",
+        },
+        {
+            "name": "Inventory",
+            "description": (
+                "Gestión completa del inventario físico.\n\n"
+                "**Artículos:** CRUD de artículos con SKU único, categoría y estado.\n"
+                "**Grupos:** Clasificación de artículos por empresa.\n"
+                "**Solicitudes de materiales:** flujo solicitud → revisión.\n"
+                "**Cable Runs:** registro de tendidos de cable por instalación.\n"
+                "**Scope Changes:** cambios de alcance con flujo de aprobación.\n"
+                "**Equipment Returns:** devoluciones con confirmación de recepción.\n"
+                "**Reportes diarios:** resumen por sitio y turno.\n"
+                "**Dashboard:** estadísticas agregadas."
+            ),
+        },
+        {
+            "name": "Schedules",
+            "description": (
+                "Módulo de programación de turnos.\n\n"
+                "**Cuadrillas (Squads):** grupos de técnicos con elegibilidad configurable.\n"
+                "**Tipos de turno:** catálogo de modalidades de turno.\n"
+                "**Horarios:** upsert individual, bulk y borrado por rango de fechas.\n"
+                "**Slots disponibles:** publicación de turnos abiertos para claims.\n"
+                "**Claims:** un técnico reclama (o libera) un slot disponible.\n"
+                "**Solicitudes de cancelación:** flujo para cancelar un turno asignado.\n"
+                "**Notificaciones:** avisos de cambio de turno con mark-as-read."
+            ),
+        },
+        {
+            "name": "Installations",
+            "description": (
+                "Módulo central de gestión de proyectos de instalación.\n\n"
+                "**Sitios:** listado, detalle, status, onboarding via `project_sites`.\n"
+                "**Canvas de dispositivos:** posicionamiento, jerarquía, capas.\n"
+                "**Flujo de despacho:** despacho → recepción → instalación por dispositivo.\n"
+                "**BOM:** bill of materials por sitio.\n"
+                "**Proyectos SIG:** proyectos internos con flujo de aprobación.\n"
+                "**Admin:** gestión de usuarios, roles y permisos (RBAC).\n"
+                "**Dashboard CEO:** métricas agregadas de alto nivel."
+            ),
+        },
+        {
+            "name": "Layers",
+            "description": (
+                "Catálogo de capas (layers) usadas en el canvas de instalaciones. "
+                "Cada capa agrupa dispositivos en un plano independiente dentro de una instalación."
+            ),
+        },
+        {
+            "name": "SIGTools",
+            "description": (
+                "Proxy de solo lectura a la base de datos externa `sigtools_beta`. "
+                "Expone el catálogo de sitios del sistema legacy."
+            ),
+        },
+        {
+            "name": "Chatbot",
+            "description": (
+                "Integración con Claude AI (Anthropic). Solo accesible para admins.\n\n"
+                "- `POST /api/v1/chatbot/message/` — envía un mensaje y recibe respuesta del modelo.\n"
+                "- `GET /api/v1/chatbot/ping/` — verifica que la API key de Claude esté configurada."
+            ),
+        },
+        {
+            "name": "CodeGen",
+            "description": (
+                "Generación de código con IA (Claude + Ollama) con auditoría. Solo admins.\n\n"
+                "Flujo: generar → revisar en auditoría → aprobar o rechazar."
+            ),
+        },
+    ],
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SORT_OPERATIONS": False,
+    "ENUM_GENERATE_CHOICE_DESCRIPTION": True,
+    "SWAGGER_UI_SETTINGS": {
+        "deepLinking": True,
+        "displayRequestDuration": True,
+        "filter": True,
+        "persistAuthorization": True,
+        "defaultModelsExpandDepth": 1,
+        "defaultModelExpandDepth": 2,
+        "docExpansion": "list",
+        "tryItOutEnabled": False,
+    },
 }
 
 # ---------------------------------------------------------------------------
