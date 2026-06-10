@@ -450,7 +450,10 @@ class SiteDetailView(APIView):
     def _update(self, request: Request, site_id: int) -> Response:
         serializer = SiteUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        updated = services.update_site(site_id, serializer.validated_data)
+        try:
+            updated = services.update_site(site_id, serializer.validated_data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         if updated is None:
             return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(updated, status=status.HTTP_200_OK)
