@@ -7,8 +7,8 @@
 # (definida como funcion global en esta sesion)
 
 param(
-    [int]$UserId   = 102,
-    [string]$ApiBase = "http://192.168.101.135:8000"
+    [int]$UserId = 102,
+    [string]$ApiBase = "http://localhost:8000"
 )
 
 $rawOut = docker exec SIGplatform-web python -c "
@@ -35,27 +35,27 @@ if ($token -notlike "eyJ*") {
     Write-Host "(El contenedor puede estar todavia iniciando. Espera unos segundos y reintenta.)" -ForegroundColor Yellow
     return
 }
-    $global:jwtToken   = $token
-    $global:jwtApiBase = $ApiBase
+$global:jwtToken = $token
+$global:jwtApiBase = $ApiBase
 
-    Write-Host ""
-    Write-Host "Token generado (valido 60 min):" -ForegroundColor Green
-    Write-Host $token -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Guardado en `$global:jwtToken" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "Ejemplo:" -ForegroundColor Yellow
-    Write-Host "  Invoke-ChatRequest `"genera endpoint para listar sitios de sigtools beta`"" -ForegroundColor White
-    Write-Host "  Invoke-AuditList                  # ver ultimos 10 codegen audits" -ForegroundColor White
-    Write-Host "  Invoke-AuditList -Last 20 -Status pending  # filtrar por estado" -ForegroundColor White
-    Write-Host ""
+Write-Host ""
+Write-Host "Token generado (valido 60 min):" -ForegroundColor Green
+Write-Host $token -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Guardado en `$global:jwtToken" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "Ejemplo:" -ForegroundColor Yellow
+Write-Host "  Invoke-ChatRequest `"genera endpoint para listar sitios de sigtools beta`"" -ForegroundColor White
+Write-Host "  Invoke-AuditList                  # ver ultimos 10 codegen audits" -ForegroundColor White
+Write-Host "  Invoke-AuditList -Last 20 -Status pending  # filtrar por estado" -ForegroundColor White
+Write-Host ""
 
-    # Copia al portapapeles automaticamente
-    $token | Set-Clipboard
-    Write-Host ">> Copiado al portapapeles." -ForegroundColor DarkGray
+# Copia al portapapeles automaticamente
+$token | Set-Clipboard
+Write-Host ">> Copiado al portapapeles." -ForegroundColor DarkGray
 
-    # Emite el token al pipeline para permitir: $t = (.\gen_token.ps1)
-    Write-Output $token
+# Emite el token al pipeline para permitir: $t = (.\gen_token.ps1)
+Write-Output $token
 
 # ─── Helper: llama al chatbot con Invoke-RestMethod (timeout 5 min) ──────────
 function global:Invoke-ChatRequest {
@@ -68,7 +68,7 @@ function global:Invoke-ChatRequest {
         return
     }
     $escapedMsg = $Message.Replace('\', '\\').Replace('"', '\"')
-    $body       = "{`"message`":`"$escapedMsg`",`"history`":[]}"
+    $body = "{`"message`":`"$escapedMsg`",`"history`":[]}"
 
     try {
         Invoke-RestMethod `
@@ -78,7 +78,8 @@ function global:Invoke-ChatRequest {
             -ContentType "application/json" `
             -Body    $body `
             -TimeoutSec 300
-    } catch {
+    }
+    catch {
         $status = $_.Exception.Response.StatusCode.value__
         $detail = $_.ErrorDetails.Message
         Write-Host "HTTP $status : $detail" -ForegroundColor Red
@@ -104,7 +105,8 @@ function global:Invoke-AuditDetail {
     $code = if ($r.finalCode.PSObject.Properties.Count -gt 0) { $r.finalCode } else { $r.generatedCode }
     if ($code.PSObject.Properties.Count -eq 0) {
         Write-Host "`n(Sin codigo generado en este audit)" -ForegroundColor DarkGray
-    } else {
+    }
+    else {
         foreach ($file in $code.PSObject.Properties) {
             Write-Host "`n--- $($file.Name) ---" -ForegroundColor Green
             Write-Host $file.Value
@@ -115,8 +117,8 @@ function global:Invoke-AuditDetail {
 # ─── Helper: listar todos los audits de codegen ───────────────────────────────
 function global:Invoke-AuditList {
     param(
-        [string]$Api    = $global:jwtApiBase,
-        [int]   $Last   = 10,
+        [string]$Api = $global:jwtApiBase,
+        [int]   $Last = 10,
         [string]$Status = ""          # filtra por: pending | approved | deployed | rejected
     )
     if (-not $global:jwtToken) { Write-Host "ERROR: Ejecuta primero .\gen_token.ps1" -ForegroundColor Red; return }
@@ -138,9 +140,9 @@ function global:Invoke-AuditList {
         $color = switch ($a.status) {
             "deployed" { "Green" }
             "approved" { "DarkGreen" }
-            "pending"  { "Yellow" }
+            "pending" { "Yellow" }
             "rejected" { "Red" }
-            default    { "Gray" }
+            default { "Gray" }
         }
         Write-Host ("[ID:{0,-4}] [{1,-8}] [{2,-12}] {3}" -f $a.id, $a.status.ToUpper(), $a.targetApp, $a.userRequest) -ForegroundColor $color
     }
@@ -162,7 +164,8 @@ function global:Invoke-Approve {
             -TimeoutSec 60
         Write-Host "[OK] Audit $Id desplegado — status: $($r.status)" -ForegroundColor Green
         if ($r.deployError) { Write-Host "Deploy error: $($r.deployError)" -ForegroundColor Red }
-    } catch {
+    }
+    catch {
         $status = $_.Exception.Response.StatusCode.value__
         try { $detail = ($_.ErrorDetails.Message | ConvertFrom-Json).detail } catch { $detail = $_.ErrorDetails.Message }
         Write-Host "HTTP $status : $detail" -ForegroundColor Red
