@@ -5,3 +5,13 @@
 #
 # Production deploy: docker compose -f docker-compose.yml up -d
 #   (no override file, NGINX_PORT defaults to 80 via docker-compose.yml)
+
+services:
+  web:
+    environment:
+      # Local dev only: when reaching the app at https://localhost the browser
+      # rejects a cookie scoped to domain ".sig.systems" (the production default),
+      # so the sig_token cookie never gets stored and every /me/ returns 401.
+      # An empty value makes the cookie host-only — production.py maps "" → None.
+      # This override is NOT used in production (deploy runs -f docker-compose.yml).
+      - SIGTOOLS_COOKIE_DOMAIN=

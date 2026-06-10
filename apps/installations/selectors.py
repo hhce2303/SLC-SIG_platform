@@ -5,6 +5,7 @@ Complex joins use raw SQL; simple lookups use the ORM.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
 from typing import Any
@@ -358,6 +359,7 @@ def _compute_sites_dashboard() -> list[dict]:
             s.state_code,
             s.customer_group_id,
             ist.name            AS status,
+            ss.status_name      AS site_status,
             u.name              AS responsable,
             it_u.name           AS it_manager,
             i.id                AS installation_id,
@@ -366,6 +368,7 @@ def _compute_sites_dashboard() -> list[dict]:
             i.starting_date,
             i.limit_date
         FROM sites s
+        LEFT JOIN site_statuses ss  ON ss.id            = s.site_status_id
         LEFT JOIN (
             SELECT site_id, MAX(id) AS latest_id
             FROM installations
@@ -456,6 +459,7 @@ def _compute_sites_dashboard() -> list[dict]:
             "id": row["id"],
             "name": row["name"],
             "status": row["status"] or None,
+            "site_status": row.get("site_status") or None,
             "address": row["address"] or None,
             "location": location,
             "responsable": row["responsable"] or None,
@@ -565,6 +569,43 @@ def get_site_detail(site_id: int) -> dict | None:
     site = get_site_or_404(site_id)
     if site is None:
         return None
+    # Site lifecycle status (site_statuses: Created/Installing/Live Testing/Live/
+    # Staging) via sites.site_status_id. Exposed as `status` so the Project Info
+    # editor can read and write it. This is the SITE lifecycle, distinct from the
+    # installation work status (inst_statuses) shown elsewhere.
+    site_status_id = None
+    site_status = None
+    with connections[_DB].cursor() as cur:
+        cur.execute(
+            "SELECT s.site_status_id, ss.status_name "
+            "FROM sites s LEFT JOIN site_statuses ss ON ss.id = s.site_status_id "
+            "WHERE s.id = %s",
+            [site_id],
+        )
+        row = cur.fetchone()
+        if row:
+            site_status_id, site_status = row[0], row[1]
+
+    # Personnel from the latest installation of this site. The Project Info editor
+    # reads project_owner / it_lead_tech_id from the site detail; they actually
+    # live on the installation, so surface them here (with resolved names).
+    project_owner = it_lead_tech_id = None
+    project_owner_name = it_lead_tech_name = None
+    with connections[_DB].cursor() as cur:
+        cur.execute(
+            """
+            SELECT i.project_owner, uo.name, i.it_lead_tech_id, ut.name
+            FROM installations i
+            LEFT JOIN users uo ON uo.id = i.project_owner
+            LEFT JOIN users ut ON ut.id = i.it_lead_tech_id
+            WHERE i.site_id = %s AND i.deleted_at IS NULL
+            ORDER BY i.id DESC LIMIT 1
+            """,
+            [site_id],
+        )
+        row = cur.fetchone()
+        if row:
+            project_owner, project_owner_name, it_lead_tech_id, it_lead_tech_name = row
     return {
         "id":                    site.id,
         "name":                  site.name,
@@ -579,6 +620,13 @@ def get_site_detail(site_id: int) -> dict | None:
         "receive_notifications": site.receive_notifications,
         "installation_date":     site.installation_date,
         "updated_at":            site.updated_at,
+        "status":                site_status,
+        "site_status":           site_status,
+        "site_status_id":        site_status_id,
+        "project_owner":         project_owner,
+        "project_owner_name":    project_owner_name,
+        "it_lead_tech_id":       it_lead_tech_id,
+        "it_lead_tech_name":     it_lead_tech_name,
     }
 
 
@@ -1180,6 +1228,31 @@ def get_sig_project(project_id: str) -> dict | None:
         p = SigProject.objects.get(pk=project_id)
     except SigProject.DoesNotExist:
         return None
+
+    data = p.data or {}
+    # Self-heal: if the live layout is empty (e.g. a previous blanking save) but the
+    # protected `design` snapshot still holds a layout, restore the design fields
+    # from it. Only the design itself is recovered — current metadata (sitios,
+    # type, linked_installation_id) is left as-is. The next save persists the
+    # recovered layout back into `data`, so the project heals on open.
+    if not (data.get("devices") or data.get("drawings") or data.get("floorPlans")):
+        try:
+            with connections["default"].cursor() as cur:
+                cur.execute("SELECT design FROM sig_projects WHERE id = %s", [str(project_id)])
+                row = cur.fetchone()
+            if row and row[0]:
+                saved = json.loads(row[0])
+                if isinstance(saved, dict) and (
+                    saved.get("devices") or saved.get("drawings") or saved.get("floorPlans")
+                ):
+                    for key in ("devices", "drawings", "floorPlans", "enlaces"):
+                        if saved.get(key):
+                            data[key] = saved[key]
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "design recovery failed for project %s", project_id, exc_info=True
+            )
+
     return {
         "id": str(p.id),
         "name": p.name,
@@ -1190,7 +1263,7 @@ def get_sig_project(project_id: str) -> dict | None:
         "approval_status": p.approval_status,
         "approval_requested_by": p.approval_requested_by,
         "approval_requested_by_name": _sigtools_user_name_by_id(p.approval_requested_by),
-        "data": p.data,
+        "data": data,
     }
 
 

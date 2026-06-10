@@ -432,6 +432,13 @@ class SiteInventoryView(APIView):
 class SiteDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses={200: SiteDetailSerializer})
+    def get(self, request: Request, site_id: int) -> Response:
+        site_data = selectors.get_site_detail(site_id)
+        if site_data is None:
+            return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(site_data, status=status.HTTP_200_OK)
+
     @extend_schema(request=SiteUpdateSerializer, responses={200: SiteDetailSerializer})
     def patch(self, request: Request, site_id: int) -> Response:
         return self._update(request, site_id)
@@ -443,7 +450,10 @@ class SiteDetailView(APIView):
     def _update(self, request: Request, site_id: int) -> Response:
         serializer = SiteUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        updated = services.update_site(site_id, serializer.validated_data)
+        try:
+            updated = services.update_site(site_id, serializer.validated_data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         if updated is None:
             return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(updated, status=status.HTTP_200_OK)
@@ -1020,8 +1030,9 @@ class InventoryExportView(APIView):
         d = serializer.validated_data
         try:
             result = services.export_inventory_from_canvas(
-                installation_id=d["installation_id"],
                 payload=d,
+                installation_id=d.get("installation_id"),
+                site_id=d.get("site_id"),
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
