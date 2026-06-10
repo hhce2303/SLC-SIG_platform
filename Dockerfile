@@ -72,7 +72,7 @@ USER django
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start_period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health/ || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
