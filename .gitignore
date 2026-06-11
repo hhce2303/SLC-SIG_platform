@@ -52,3 +52,8 @@ graphify-out/
 export_database_complete.py
 sigtools_beta.sql
 *.sql.bak
+
+
+# Ignore gen_sigtoken.ps1
+gen_sigtoken.ps1
+gen_token.ps1
