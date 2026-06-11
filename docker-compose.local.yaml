@@ -1,0 +1,135 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  SIG Platform — Standalone Test Environment
+#
+#  Archivo autónomo: NO requiere el repositorio completo.
+#
+#  Prerequisitos:
+#    1. Docker Desktop en ejecución
+#    2. .env en esta misma carpeta (provisto por el admin)
+#    3. Imagen pre-construida disponible localmente o en registry:
+#         docker pull <registry>/sig-platform:test
+#       o cargar desde tarball:
+#         docker load -i sig-platform-test.tar
+#    4. seed_BD.sql (opcional, para poblar sigtools-db via botón "Seed DB")
+#
+#  Inicio rápido:
+#    python app.py
+#  o directo:
+#    docker compose -f docker-compose.local.yaml up -d
+#
+#  Variables de entorno relevantes (en .env o como override de shell):
+#    SIG_IMAGE                  → imagen a usar        (default: sig-platform:test)
+#    NGINX_PORT                 → puerto del host       (default: 80)
+#    LOCAL_SIGTOOLS_DB_PORT     → puerto MySQL expuesto (default: 3308)
+#    LOCAL_SIGTOOLS_ROOT_PASSWORD, LOCAL_SIGTOOLS_DB_USER, LOCAL_SIGTOOLS_DB_PASSWORD
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: sig-platform-test
+
+services:
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: SIGtest-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── MySQL local (mirror sigtools_beta) ────────────────────────────────────
+  sigtools-db:
+    image: mysql:8.0.32
+    container_name: SIGtest-sigtools-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${LOCAL_SIGTOOLS_ROOT_PASSWORD:-localroot}
+      MYSQL_DATABASE:      ${LOCAL_SIGTOOLS_DB_NAME:-sigtools_beta}
+      MYSQL_USER:          ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
+      MYSQL_PASSWORD:      ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
+    ports:
+      - "${LOCAL_SIGTOOLS_DB_PORT:-3308}:3306"
+    volumes:
+      - sigtools_db_data:/var/lib/mysql
+    healthcheck:
+      # $$MYSQL_ROOT_PASSWORD se evalúa dentro del contenedor (no en el host)
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Django web (imagen pre-construida) ────────────────────────────────────
+  web:
+    image: ${SIG_IMAGE:-sig-platform:test}
+    container_name: SIGtest-web
+    expose:
+      - "8000"
+    env_file: .env
+    environment:
+      DJANGO_ENV: production
+      REDIS_URL: redis://redis:6379/0
+      SIGTOOLS_COOKIE_DOMAIN: localhost
+      SIGTOOLS_DB_HOST: sigtools-db
+      SIGTOOLS_DB_PORT: "3306"
+      SIGTOOLS_DB_USER: ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
+      SIGTOOLS_DB_PASSWORD: ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
+    depends_on:
+      redis:
+        condition: service_healthy
+      sigtools-db:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - media_data:/app/media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # ── Nginx reverse proxy ────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: SIGtest-nginx
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      # nginx.conf se genera automáticamente por app.py si no existe
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - media_data:/app/media:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Poller de tiempo real ──────────────────────────────────────────────────
+  poller:
+    image: ${SIG_IMAGE:-sig-platform:test}
+    container_name: SIGtest-poller
+    env_file: .env
+    environment:
+      DJANGO_ENV: production
+      REDIS_URL: redis://redis:6379/0
+      SIGTOOLS_DB_HOST: sigtools-db
+      SIGTOOLS_DB_PORT: "3306"
+      SIGTOOLS_DB_USER: ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
+      SIGTOOLS_DB_PASSWORD: ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
+      REALTIME_POLL_INTERVAL: "5"
+    depends_on:
+      redis:
+        condition: service_healthy
+      sigtools-db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    command: ["python", "manage.py", "run_realtime_poller"]
+
+volumes:
+  media_data:
+  sigtools_db_data:

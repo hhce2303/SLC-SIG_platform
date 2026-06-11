@@ -42,6 +42,56 @@ C = {
 SERVICES = ["redis", "web", "nginx", "poller", "sigtools-db"]
 REPO_ROOT = Path(__file__).resolve().parent
 
+# Configuración de nginx embebida — se escribe automáticamente si falta
+_NGINX_CONF = """\
+upstream django {
+    server web:8000;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 50M;
+
+    location /media/ {
+        alias /app/media/;
+        access_log off;
+        expires 7d;
+        add_header Cache-Control "public";
+    }
+
+    location /api/ {
+        proxy_pass         http://django;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 86400;
+    }
+
+    location /web-auth/ {
+        proxy_pass         http://django;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+"""
+
+
+def _ensure_nginx_conf(directory: Path) -> None:
+    """Escribe nginx.conf junto al compose file si no existe (modo standalone)."""
+    conf = directory / "nginx.conf"
+    if not conf.exists():
+        conf.write_text(_NGINX_CONF, encoding="utf-8")
+
 # ── Docker Compose helpers ────────────────────────────────────────────────────
 def _popen_kwargs() -> dict:
     """Suppress console popup on Windows."""
@@ -462,9 +512,25 @@ class PlatformApp:
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 def find_compose_files(start: Path) -> Optional[List[Path]]:
     """
-    Resolve compose file chain relative to app.py.
-    Prefers docker-compose.local.yml over docker-compose.dev.yml as the overlay.
+    Resuelve el/los compose file(s) a usar, con dos modos:
+
+    Modo standalone (distribuible):
+      Si existe docker-compose.local.yaml (o .yml) junto a app.py,
+      se usa como archivo único. No se necesita el repositorio completo.
+      También genera nginx.conf en ese directorio si no existe.
+
+    Modo repo (desarrollo):
+      Busca docker/docker-compose.yml como base y agrega el overlay
+      docker-compose.local.yml o docker-compose.dev.yml si existe.
     """
+    # ── Modo standalone ───────────────────────────────────────────────────────
+    for name in ("docker-compose.local.yaml", "docker-compose.local.yml"):
+        standalone = start / name
+        if standalone.exists():
+            _ensure_nginx_conf(start)
+            return [standalone]
+
+    # ── Modo repo ─────────────────────────────────────────────────────────────
     docker_dir = start / "docker"
     base = docker_dir / "docker-compose.yml"
     if not base.exists():
@@ -514,8 +580,9 @@ def main():
     if not compose_files:
         messagebox.showerror(
             "Compose File Not Found",
-            "docker/docker-compose.yml not found.\n"
-            "Make sure app.py is in the repository root."
+            "No se encontró ningún archivo compose.\n\n"
+            "Modo standalone: coloca docker-compose.local.yaml junto a app.py\n"
+            "Modo repo: asegúrate de que exista docker/docker-compose.yml"
         )
         sys.exit(1)
 
