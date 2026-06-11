@@ -57,3 +57,8 @@ sigtools_beta.sql
 # Ignore gen_sigtoken.ps1
 gen_sigtoken.ps1
 gen_token.ps1
+
+.gen_sigtoken.ps1
+.gen_token.ps1
+
+.gitignore

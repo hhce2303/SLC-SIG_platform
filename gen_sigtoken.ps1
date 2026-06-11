@@ -9,7 +9,7 @@
 #   Invoke-SigRequest POST chatbot/message/ '{"message":"...","history":[]}'
 
 param(
-    [string]$User = "dcarvajal",
+    [string]$User = "jcarvajal",
     [string]$Pass = "",
     [string]$ApiBase = "http://localhost"
 )
