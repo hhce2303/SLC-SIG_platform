@@ -5,6 +5,11 @@ Django never creates or migrates these tables.
 
 from django.db import models
 
+# Tenant-owned models (tenant = customer_groups). See apps/sigtools/tenancy.py.
+#   TenantDirectModel — carries its own customer_group_id column (sites + inventory).
+#   TenantScopedModel — derives the tenant via a FK chain; sets tenant_path, no column.
+from apps.sigtools.tenancy import TenantDirectModel, TenantScopedModel
+
 
 class _SigtoolsBase(models.Model):
     """Abstract base for all sigtools_beta models."""
@@ -77,7 +82,8 @@ class UserRole(_SigtoolsBase):
 # Sites
 # ---------------------------------------------------------------------------
 
-class Site(_SigtoolsBase):
+class Site(TenantDirectModel, _SigtoolsBase):
+    # DIRECT: sites already has a hard customer_group_id FK in the DB.
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=255, db_index=True)
     ip_address = models.CharField(max_length=250)
@@ -108,7 +114,8 @@ class Site(_SigtoolsBase):
 # Devices & Cameras
 # ---------------------------------------------------------------------------
 
-class Device(_SigtoolsBase):
+class Device(TenantScopedModel, _SigtoolsBase):
+    tenant_path = "site__customer_group_id"  # DERIVED via site
     DEVICE_CODES = [
         ("Router", "Router"),
         ("PDU", "PDU"),
@@ -136,7 +143,8 @@ class Device(_SigtoolsBase):
         return f"{self.name} ({self.code})"
 
 
-class Camera(_SigtoolsBase):
+class Camera(TenantScopedModel, _SigtoolsBase):
+    tenant_path = "device__site__customer_group_id"  # DERIVED via device -> site
     id = models.BigAutoField(primary_key=True)
     serial = models.CharField(max_length=255)
     preowned = models.BooleanField(default=False)
@@ -165,7 +173,8 @@ class Camera(_SigtoolsBase):
 # Installations
 # ---------------------------------------------------------------------------
 
-class Installation(_SigtoolsBase):
+class Installation(TenantScopedModel, _SigtoolsBase):
+    tenant_path = "site__customer_group_id"  # DERIVED via site
     id = models.BigAutoField(primary_key=True)
     site = models.ForeignKey(
         Site, on_delete=models.DO_NOTHING,
@@ -195,7 +204,8 @@ class Installation(_SigtoolsBase):
 # Events
 # ---------------------------------------------------------------------------
 
-class Event(_SigtoolsBase):
+class Event(TenantScopedModel, _SigtoolsBase):
+    tenant_path = "device__site__customer_group_id"  # DERIVED via device -> site
     SOURCE_CHOICES = [("SIG", "SIG"), ("SLC", "SLC"), ("Other", "Other")]
 
     id = models.BigAutoField(primary_key=True)
@@ -329,9 +339,17 @@ class DeviceType(_SigtoolsBase):
         return f"{self.brand} {self.model}"
 
 
-class OtherDevice(_SigtoolsBase):
+class OtherDevice(TenantScopedModel, _SigtoolsBase):
+    tenant_path = "installation__site__customer_group_id"  # DERIVED via installation -> site
     id = models.BigAutoField(primary_key=True)
-    installation_id = models.BigIntegerField(db_index=True)
+    # installation_id was a bare BigIntegerField; declared as a soft FK (same
+    # column) so the tenant_path can traverse installation -> site. The `_id`
+    # attribute (installation_id) still works for existing callers.
+    installation = models.ForeignKey(
+        "sigtools.Installation", on_delete=models.DO_NOTHING,
+        db_constraint=False, db_column="installation_id",
+        db_index=True, related_name="+",
+    )
     device_type_id = models.BigIntegerField()
     device_id = models.BigIntegerField()
     serial = models.CharField(max_length=255)
@@ -348,7 +366,8 @@ class OtherDevice(_SigtoolsBase):
         return f"OtherDevice #{self.id}"
 
 
-class Server(_SigtoolsBase):
+class Server(TenantScopedModel, _SigtoolsBase):
+    tenant_path = "site__customer_group_id"  # DERIVED via site
     SYSTEM_CHOICES = [
         ("Arteco", "Arteco"),
         ("ICRealtime", "ICRealtime"),
@@ -396,8 +415,8 @@ class Company(_SigtoolsBase):
         return self.name
 
 
-class ArticleGroup(_SigtoolsBase):
-    """Maps to sigtools_beta.`groups` (Supabase article grouping)."""
+class ArticleGroup(TenantDirectModel, _SigtoolsBase):
+    """Maps to sigtools_beta.`groups` (Supabase article grouping). DIRECT (inventory)."""
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
@@ -415,7 +434,12 @@ class ArticleGroup(_SigtoolsBase):
         return self.name
 
 
-class Article(_SigtoolsBase):
+class Article(TenantScopedModel, _SigtoolsBase):
+    # DERIVED: physical unit tracked per site. Tenant via site -> customer_group.
+    # Each Article is a unique, trackeable asset (stock item); it is NOT a shared
+    # catalog entry — hence scoped to a site, not to the customer group directly.
+    tenant_path = "site__customer_group_id"
+
     id = models.BigAutoField(primary_key=True)
     sku = models.CharField(max_length=255, unique=True)
     name = models.TextField()
@@ -424,6 +448,11 @@ class Article(_SigtoolsBase):
     group = models.ForeignKey(
         ArticleGroup, on_delete=models.DO_NOTHING,
         db_constraint=False, null=True, blank=True, related_name="articles",
+    )
+    site = models.ForeignKey(
+        "sigtools.Site", on_delete=models.DO_NOTHING,
+        db_constraint=False, null=True, blank=True,
+        db_column="site_id", related_name="articles",
     )
     status = models.TextField(default="activo")
     location = models.TextField(null=True, blank=True)
@@ -448,7 +477,11 @@ class Article(_SigtoolsBase):
         return f"{self.sku} — {self.name}"
 
 
-class ActivityLog(_SigtoolsBase):
+class ActivityLog(TenantScopedModel, _SigtoolsBase):
+    # DERIVED: follows the article's site. No column added — tenant resolved via
+    # article -> site -> customer_group (3-level join, no redundancy).
+    tenant_path = "article__site__customer_group_id"
+
     id = models.BigAutoField(primary_key=True)
     article = models.ForeignKey(
         Article, on_delete=models.DO_NOTHING,

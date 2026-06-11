@@ -393,13 +393,61 @@ class PlatformApp:
         return env
 
     def _do_seed_db(self):
+        """Dispatcher: elige entre importar un archivo .sql o ejecutar SQL inline."""
+        mode = self._ask_seed_mode()
+        if mode == "file":
+            self._seed_from_file()
+        elif mode == "inline":
+            self._seed_inline_sql()
+
+    def _ask_seed_mode(self) -> Optional[str]:
+        """Diálogo de elección: devuelve 'file', 'inline', o None si cancela."""
+        result = [None]
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Seed DB — Modo")
+        dlg.configure(bg=C["bg"])
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="¿Cómo deseas inyectar SQL en sigtools-db?",
+                 bg=C["bg"], fg=C["text"],
+                 font=("Helvetica", 11)).pack(pady=(18, 12), padx=24)
+
+        btn_frame = tk.Frame(dlg, bg=C["bg"])
+        btn_frame.pack(padx=24, pady=(0, 20))
+
+        def choose(val):
+            result[0] = val
+            dlg.destroy()
+
+        tk.Button(btn_frame, text="Importar archivo .sql",
+                  command=lambda: choose("file"),
+                  bg=C["btn"], fg=C["accent"],
+                  activebackground=C["btn_hover"], activeforeground=C["accent"],
+                  relief="flat", padx=14, pady=7,
+                  font=("Helvetica", 10, "bold"), cursor="hand2", bd=0,
+                  width=22).pack(side="left", padx=6)
+
+        tk.Button(btn_frame, text="SQL inline",
+                  command=lambda: choose("inline"),
+                  bg=C["btn"], fg=C["yellow"],
+                  activebackground=C["btn_hover"], activeforeground=C["yellow"],
+                  relief="flat", padx=14, pady=7,
+                  font=("Helvetica", 10, "bold"), cursor="hand2", bd=0,
+                  width=22).pack(side="left", padx=6)
+
+        self.root.wait_window(dlg)
+        return result[0]
+
+    def _seed_from_file(self):
+        """Importa un snapshot .sql completo en sigtools-db (comportamiento original)."""
         sql_path_str = filedialog.askopenfilename(
             title="Seleccionar snapshot SQL para inyectar en sigtools-db",
             filetypes=[("SQL files", "*.sql"), ("All files", "*.*")],
             initialdir=str(Path.home()),
         )
         if not sql_path_str:
-            return  # usuario canceló
+            return
 
         sql_path = Path(sql_path_str)
         size_kb  = sql_path.stat().st_size // 1024
@@ -469,6 +517,120 @@ class PlatformApp:
                 self._log_line(f"✓ sigtools-db poblada desde {sql_path.name}", "success")
             else:
                 self._log_line(f"✗ Inyección fallida (exit {proc.returncode})", "error")
+                self._log_line("  Verifica que sigtools-db esté corriendo (botón Up).", "warn")
+
+        self._run_async(run)
+
+    def _seed_inline_sql(self):
+        """Abre un editor para pegar/escribir SQL y ejecutarlo contra sigtools-db."""
+        result = [None]  # {"sql": str, "db": str}
+
+        env = self._load_env()
+        default_db = env.get("LOCAL_SIGTOOLS_DB_NAME", "sigtools_beta")
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("SQL inline → sigtools-db")
+        dlg.configure(bg=C["bg"])
+        dlg.geometry("720x520")
+        dlg.grab_set()
+
+        # Base de datos
+        db_row = tk.Frame(dlg, bg=C["bg"])
+        db_row.pack(fill="x", padx=12, pady=(12, 4))
+        tk.Label(db_row, text="Base de datos:", bg=C["bg"], fg=C["text"],
+                 font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 8))
+        db_var = tk.StringVar(value=default_db)
+        db_entry = tk.Entry(db_row, textvariable=db_var, bg=C["surface"], fg=C["accent"],
+                            font=("Courier", 10), insertbackground=C["accent"],
+                            relief="flat", width=30)
+        db_entry.pack(side="left")
+
+        tk.Label(dlg, text="SQL a ejecutar:", bg=C["bg"], fg=C["text"],
+                 font=("Helvetica", 10, "bold")).pack(anchor="w", padx=12, pady=(8, 4))
+
+        txt = scrolledtext.ScrolledText(
+            dlg, bg=C["surface"], fg=C["text"],
+            font=("Courier", 10), wrap="none",
+            insertbackground=C["accent"],
+        )
+        txt.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        bar = tk.Frame(dlg, bg=C["bg"])
+        bar.pack(fill="x", padx=12, pady=(0, 12))
+
+        def execute():
+            sql = txt.get("1.0", "end-1c").strip()
+            db  = db_var.get().strip()
+            if not sql:
+                messagebox.showwarning("SQL vacío", "Escribe o pega SQL antes de ejecutar.", parent=dlg)
+                return
+            if not db:
+                messagebox.showwarning("Base de datos", "Especifica la base de datos.", parent=dlg)
+                return
+            result[0] = {"sql": sql, "db": db}
+            dlg.destroy()
+
+        tk.Button(bar, text="Ejecutar",
+                  command=execute,
+                  bg=C["btn"], fg=C["green"],
+                  activebackground=C["btn_hover"], activeforeground=C["green"],
+                  relief="flat", padx=14, pady=6,
+                  font=("Helvetica", 10, "bold"), cursor="hand2", bd=0).pack(side="left", padx=(0, 8))
+
+        tk.Button(bar, text="Cancelar",
+                  command=dlg.destroy,
+                  bg=C["btn"], fg=C["dim"],
+                  activebackground=C["btn_hover"], activeforeground=C["dim"],
+                  relief="flat", padx=14, pady=6,
+                  font=("Helvetica", 10, "bold"), cursor="hand2", bd=0).pack(side="left")
+
+        self.root.wait_window(dlg)
+
+        if not result[0]:
+            return
+
+        sql = result[0]["sql"]
+        db  = result[0]["db"]
+        local_root_pass = env.get("LOCAL_SIGTOOLS_ROOT_PASSWORD", "localroot")
+
+        def run():
+            preview = sql[:120].replace("\n", " ")
+            self._log_line(f"Ejecutando SQL inline en sigtools-db ({db}) ...", "info")
+            self._log_line(f"  {preview}{'...' if len(sql) > 120 else ''}", "dim")
+
+            inject_cmd = self.docker._base_cmd() + [
+                "exec", "-T",
+                "-e", f"MYSQL_PWD={local_root_pass}",
+                "sigtools-db",
+                "mysql", "-uroot", f"-D{db}",
+            ]
+
+            proc = subprocess.Popen(
+                inject_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding="utf-8", errors="replace",
+                **_popen_kwargs()
+            )
+            self._proc = proc
+
+            try:
+                proc.stdin.write(sql)
+            except Exception as exc:
+                self._log_line(f"Error escribiendo SQL: {exc}", "error")
+            finally:
+                proc.stdin.close()
+
+            for line in proc.stdout:
+                line = line.rstrip()
+                tag = "error" if "error" in line.lower() else "dim"
+                self._log_line(line, tag)
+
+            proc.wait()
+            if proc.returncode == 0:
+                self._log_line(f"✓ SQL ejecutado exitosamente en {db}", "success")
+            else:
+                self._log_line(f"✗ SQL falló (exit {proc.returncode})", "error")
                 self._log_line("  Verifica que sigtools-db esté corriendo (botón Up).", "warn")
 
         self._run_async(run)

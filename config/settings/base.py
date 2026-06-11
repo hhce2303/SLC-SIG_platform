@@ -77,6 +77,10 @@ MIDDLEWARE = [
     "apps.core.middleware.daily_user.DailyUserMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # T1 multi-tenant foundation: reset the per-request company contextvar so a
+    # company activated in one request never leaks into the next on a reused
+    # worker. Does NOT resolve the company (customer auth / T4 does that).
+    "apps.sigtools.tenancy.TenantResetMiddleware",
 ]
 
 # ---------------------------------------------------------------------------
