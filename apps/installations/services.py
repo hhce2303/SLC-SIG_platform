@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -1139,6 +1140,75 @@ _EXPORT_CAMERA_VIEW_INSERT_SQL = """
 """
 
 
+def _assign_canonical_numbering(
+    all_devices: list[dict],
+    installation_id: int,
+    cur,
+) -> tuple[dict[str, dict], list[str]]:
+    """
+    For camera devices in the payload, determine a collision-free CAM NN view_name
+    against the existing views already in the DB for this installation.
+    Cameras that collide with existing rows (by a different canvas_instance_id)
+    get the next free sequential number.
+
+    Returns:
+      numbering  — {instanceId: {numero: int, view_name: str}} for every camera
+      renumbered — [instanceId, ...] for cameras whose number actually changed
+    """
+    camera_devices = [d for d in all_devices if d.get("category") == "camera"]
+    if not camera_devices:
+        return {}, []
+
+    canvas_ids = [d.get("instanceId") or d.get("id") for d in camera_devices]
+    placeholders = ",".join(["%s"] * len(canvas_ids))
+    # Fetch existing View_name values that will NOT be overwritten by this export
+    cur.execute(
+        f"SELECT v.View_name FROM views v "
+        f"JOIN cameras c ON c.id = v.camera_id AND c.deleted_at IS NULL "
+        f"WHERE c.installation_id = %s "
+        f"  AND (c.canvas_instance_id IS NULL OR c.canvas_instance_id NOT IN ({placeholders})) "
+        f"  AND v.deleted_at IS NULL",
+        [installation_id, *canvas_ids],
+    )
+    taken: set[int] = set()
+    for (vn,) in cur.fetchall():
+        m = re.search(r"\d+", vn or "")
+        if m:
+            taken.add(int(m.group()))
+
+    sorted_cams = sorted(camera_devices, key=lambda d: int(d.get("numero") or 0))
+    numbering: dict[str, dict] = {}
+    renumbered: list[str] = []
+    used: set[int] = set()
+    _next = [1]
+
+    def next_free() -> int:
+        while _next[0] in taken or _next[0] in used:
+            _next[0] += 1
+        n = _next[0]
+        _next[0] += 1
+        return n
+
+    for dev in sorted_cams:
+        iid = dev.get("instanceId") or dev.get("id")
+        requested = int(dev.get("numero") or 0)
+        orig_m = re.search(r"\d+", dev.get("view_name") or "")
+        orig_n = int(orig_m.group()) if orig_m else 0
+
+        if requested > 0 and requested not in taken and requested not in used:
+            final_n = requested
+        else:
+            final_n = next_free()
+
+        used.add(final_n)
+        canonical_vn = f"CAM {final_n:02d}"
+        numbering[iid] = {"numero": final_n, "view_name": canonical_vn}
+        if orig_n != final_n:
+            renumbered.append(iid)
+
+    return numbering, renumbered
+
+
 def export_inventory_from_canvas(payload: dict, installation_id: int | None = None, site_id: int | None = None) -> dict:
     """
     Takes the full canvas snapshot and creates cameras / other_devices for the
@@ -1172,7 +1242,18 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
                 raise ValueError(f"Installation {installation_id} not found.")
             site_id = row[0]
 
+            design_mode = bool(payload.get("design_mode", True))
             all_devices = [*payload.get("devices", []), *payload.get("indoorDevices", [])]
+            # Derive view_name server-side for simplified payloads that omit it
+            for dev in all_devices:
+                if not dev.get("view_name"):
+                    prefix = "cam" if dev.get("category") == "camera" else "dev"
+                    num = dev.get("numero") or 0
+                    label = dev.get("displayLabel") or dev.get("display_label")
+                    dev["view_name"] = (
+                        f"{prefix} {num}" if design_mode or not label else label
+                    )
+            numbering, renumbered = _assign_canonical_numbering(all_devices, installation_id, cur)
             camera_params: list[list] = []
             camera_update_params: list[list] = []
             camera_view_params: list[list] = []
@@ -1204,7 +1285,7 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
 
                 category = dev.get("category", "other")
                 network_device_id = dev.get("networkDeviceId") or None
-                view_name = dev.get("view_name")
+                view_name = numbering.get(instance_id, {}).get("view_name") or dev.get("view_name")
                 
                 if inventory_id is not None:
                     # UPDATE existing physical device — only claim the canvas link
@@ -1345,6 +1426,8 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
         "created_cameras": len(camera_params),
         "created_other_devices": len(other_params),
         "skipped": skipped,
+        "numbering": numbering,
+        "renumbered": renumbered,
     }
 
 
@@ -1499,6 +1582,16 @@ def validate_topology(devices, connections) -> dict:
     from apps.installations import topology
 
     return topology.validate(list(devices), list(connections))
+
+
+def analyze_topology(devices, connections, check: dict | None = None) -> dict:
+    """
+    Full topology analysis: validate + build_tree + cascade + optional connection check.
+    check = {source: str, target: str} to validate a proposed new connection.
+    """
+    from apps.installations import topology
+
+    return topology.analyze(list(devices), list(connections), check)
 
 
 def create_indoor_map(site_id: int, image_file, label: str = "", uploaded_by: int | None = None):
@@ -2456,3 +2549,260 @@ def mark_all_notifications_read(*, recipient_id: int) -> int:
     from apps.installations.models import Notification
 
     return Notification.objects.filter(recipient_id=recipient_id, is_read=False).update(is_read=True)
+
+
+# ---------------------------------------------------------------------------
+# Geocoding
+# ---------------------------------------------------------------------------
+
+_NOMINATIM_UA = "SIGInstallations/1.0 (juan.riascos@sig.systems)"
+_NOMINATIM_BASE = "https://nominatim.openstreetmap.org"
+
+
+def geocode_site(site_id: int) -> dict | None:
+    """
+    Returns {lat, lng, source} for a site or None if not resolvable.
+    Cascade:
+      1. DB lat/lon already stored
+      2. Nominatim structured query (street+city+state+country — most precise)
+      3. Nominatim free-form full address
+      4. Nominatim free-form address only
+      5. Nominatim city+state fallback
+      6. US Census Geocoder (only when country=us/blank and Nominatim failed)
+    Saves resolved coordinates back to project_sites. Cache key v2 so stale
+    None results from the old logic are retried with the improved cascade.
+    """
+    import re as _re
+    import httpx
+    from apps.installations.models import ProjectSite
+
+    cache_key = f"inst:geocode:site:v4:{site_id}"
+
+    def _strip_unit(addr: str) -> str:
+        """Remove apartment/suite/unit suffixes that confuse Nominatim."""
+        return _re.sub(
+            r",?\s*(suite|ste\.?|unit|apt\.?|#)\s*[\w-]+\s*$",
+            "",
+            addr,
+            flags=_re.IGNORECASE,
+        ).strip().rstrip(",").strip()
+
+    def _extract_street(addr: str, city: str) -> str:
+        """
+        When address already contains city/state/ZIP (e.g. '4429 US-1, Fort Pierce, FL 34982'),
+        extract only the street number+name for use in structured Nominatim queries.
+        Looks for ', CITY' pattern (after a comma) to avoid matching city names that are
+        part of the street name itself (e.g. '3281 Manor Way, Dallas, TX').
+        """
+        if not addr:
+            return addr
+        # Match ', CITY' after a comma separator (city appears as a distinct segment)
+        if city:
+            m_city = _re.search(r",\s*" + _re.escape(city) + r"\b", addr, flags=_re.IGNORECASE)
+            if m_city:
+                return addr[:m_city.start()].strip()
+        # Fallback: truncate at ', STATE ZIP' or ', STATE, ZIP' pattern
+        m = _re.search(r",\s*[A-Za-z]{2}\s+\d{5}(?:-\d{4})?\s*$", addr)
+        if m:
+            return addr[:m.start()].strip(", ").strip()
+        # Fallback: truncate at standalone trailing ZIP
+        m = _re.search(r",\s*\d{5}(?:-\d{4})?\s*$", addr)
+        if m:
+            trimmed = addr[:m.start()]
+            m2 = _re.search(r",\s*[A-Za-z]{2}\s*$", trimmed)
+            if m2:
+                trimmed = trimmed[:m2.start()]
+            return trimmed.strip(", ").strip()
+        return addr
+
+    def _nominatim_structured(address: str, city: str, state: str, country: str) -> tuple[float, float] | None:
+        params = {
+            "format": "json", "limit": 1,
+            "street": address,
+            "city": city,
+            "state": state,
+            "country": country or "us",
+        }
+        # Remove empty fields — Nominatim handles partial structured better than empty strings
+        params = {k: v for k, v in params.items() if v}
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/search",
+                params=params,
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=6.0,
+            )
+            data = resp.json()
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+        except Exception as exc:
+            logger.warning("[geocode] nominatim structured failed site=%s params=%s err=%s", site_id, params, exc)
+        return None
+
+    def _nominatim_free(query: str, country: str) -> tuple[float, float] | None:
+        if not query:
+            return None
+        params: dict = {"format": "json", "limit": 1, "q": query}
+        if country:
+            params["countrycodes"] = country
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/search",
+                params=params,
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=6.0,
+            )
+            data = resp.json()
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+        except Exception as exc:
+            logger.warning("[geocode] nominatim free failed site=%s q=%r err=%s", site_id, query, exc)
+        return None
+
+    def _census_geocode(address: str, city: str, state: str) -> tuple[float, float] | None:
+        """US Census Bureau geocoder — free, no key, high precision for US street addresses."""
+        query_str = ", ".join(filter(None, [address, city, state]))
+        if not query_str:
+            return None
+        try:
+            resp = httpx.get(
+                "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress",
+                params={
+                    "address": query_str,
+                    "benchmark": "Public_AR_Current",
+                    "format": "json",
+                },
+                timeout=8.0,
+            )
+            matches = resp.json().get("result", {}).get("addressMatches", [])
+            if matches:
+                coords = matches[0]["coordinates"]
+                return float(coords["y"]), float(coords["x"])  # y=lat, x=lng
+        except Exception as exc:
+            logger.warning("[geocode] census geocoder failed site=%s q=%r err=%s", site_id, query_str, exc)
+        return None
+
+    def _compute():
+        from apps.sigtools.models import Site as _SigtoolsSite
+
+        # Check ProjectSite (linked via site_id FK) for already-stored coordinates.
+        ps_row = (
+            ProjectSite.objects.using(_DB)
+            .filter(site_id=site_id, deleted_at__isnull=True)
+            .values("id", "lat", "lon")
+            .first()
+        )
+        if ps_row and ps_row["lat"] and ps_row["lon"]:
+            return {"lat": float(ps_row["lat"]), "lng": float(ps_row["lon"]), "source": "db"}
+
+        # Read address/city/state from the operational sites table.
+        row = (
+            _SigtoolsSite.objects.using(_DB)
+            .filter(pk=site_id, deleted_at__isnull=True)
+            .values("address", "city", "state_code", "country_code")
+            .first()
+        )
+        if row is None:
+            return None
+
+        raw_address = (row.get("address") or "").strip()
+        address = _strip_unit(raw_address)
+        city    = (row.get("city") or "").strip()
+        state   = (row.get("state_code") or "").strip()
+        country = (row.get("country_code") or "us").strip().lower()
+
+        # Detect if the address field already contains a full address (city/ZIP embedded).
+        # When true, extract just the street portion for the structured query, and use
+        # the address as-is for free-form queries (no need to append city/state again).
+        is_full_address = bool(
+            (city and city.lower() in address.lower())
+            or _re.search(r"\b\d{5}\b", address)
+        )
+        street_only = _extract_street(address, city) if is_full_address else address
+
+        result: tuple[float, float] | None = None
+        source = "nominatim"
+
+        # 1. Nominatim structured with clean street portion (most precise)
+        if street_only and city:
+            result = _nominatim_structured(street_only, city, state, country)
+
+        # 2. Nominatim free-form — use address as-is if it's already a full address,
+        #    otherwise assemble from fields.
+        if not result:
+            if is_full_address:
+                full_q = address
+            else:
+                full_q = ", ".join(filter(None, [address, city, state, "USA" if country == "us" else country.upper()]))
+            result = _nominatim_free(full_q, country)
+
+        # 3. Nominatim free-form address only (handles edge cases where full_q failed)
+        if not result and is_full_address and address != full_q:
+            result = _nominatim_free(address, country)
+        elif not result and not is_full_address and address:
+            result = _nominatim_free(address, country)
+
+        # 4. Nominatim city+state fallback
+        if not result:
+            city_state = ", ".join(filter(None, [city, state]))
+            result = _nominatim_free(city_state, country)
+
+        # 5. US Census Geocoder (US sites only, when all Nominatim attempts failed)
+        if not result and country in ("us", "usa", ""):
+            result = _census_geocode(address, city, state)
+            if result:
+                source = "census"
+
+        if result:
+            lat, lng = result
+            if ps_row:
+                ProjectSite.objects.using(_DB).filter(site_id=site_id).update(lat=lat, lon=lng)
+            return {"lat": lat, "lng": lng, "source": source}
+
+        logger.warning(
+            "[geocode] site %s not resolved — address=%r city=%r state=%r country=%r",
+            site_id, raw_address, city, state, country,
+        )
+        return None
+
+    return cu.cached(cache_key, _compute, 86400)
+
+
+def geocode_search(query: str, limit: int = 5) -> list[dict]:
+    """
+    Nominatim search proxy with Redis caching (TTL 1 h).
+    Returns list of {lat, lon, display_name} matching the raw Nominatim shape.
+    """
+    import hashlib
+    import httpx
+
+    key_hash = hashlib.md5(f"{query.lower()}:{limit}".encode()).hexdigest()
+    cache_key = f"inst:geocode:search:{key_hash}"
+
+    def _compute():
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/search",
+                params={
+                    "format": "json",
+                    "limit": limit,
+                    "q": query,
+                    "countrycodes": "co,mx,pe,cl,ar,ec,ve,pa,us,es",
+                    "addressdetails": 0,
+                },
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=5.0,
+            )
+            data = resp.json()
+            return [
+                {
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "display_name": r.get("display_name", ""),
+                }
+                for r in (data or [])
+            ]
+        except Exception:
+            return []
+
+    return cu.cached(cache_key, _compute, 3600)

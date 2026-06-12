@@ -523,32 +523,32 @@ def find_compose_files(start: Path) -> Optional[List[Path]]:
       Busca docker/docker-compose.yml como base y agrega el overlay
       docker-compose.local.yml o docker-compose.dev.yml si existe.
     """
-    # ── Modo standalone ───────────────────────────────────────────────────────
+    # ── Modo repo (prioridad: si existe docker/ con compose base, úsalo) ────────
+    docker_dir = start / "docker"
+    base = docker_dir / "docker-compose.yml"
+    if not base.exists():
+        base = start / "docker-compose.yml"
+
+    if base.exists():
+        overlays = [
+            docker_dir / "docker-compose.local.yml",
+            docker_dir / "docker-compose.dev.yml",
+        ]
+        files = [base]
+        for ov in overlays:
+            if ov.exists():
+                files.append(ov)
+                break
+        return files
+
+    # ── Modo standalone (sin repositorio: sólo docker-compose.local.yaml) ─────
     for name in ("docker-compose.local.yaml", "docker-compose.local.yml"):
         standalone = start / name
         if standalone.exists():
             _ensure_nginx_conf(start)
             return [standalone]
 
-    # ── Modo repo ─────────────────────────────────────────────────────────────
-    docker_dir = start / "docker"
-    base = docker_dir / "docker-compose.yml"
-    if not base.exists():
-        base = start / "docker-compose.yml"
-    if not base.exists():
-        return None
-
-    overlays = [
-        docker_dir / "docker-compose.local.yml",
-        docker_dir / "docker-compose.dev.yml",
-    ]
-    files = [base]
-    for ov in overlays:
-        if ov.exists():
-            files.append(ov)
-            break
-
-    return files
+    return None
 
 
 def check_docker() -> bool:
