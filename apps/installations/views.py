@@ -161,33 +161,7 @@ class SiteDeviceCatalogView(APIView):
 
     @extend_schema(responses={200: SiteDeviceCatalogItemSerializer(many=True)})
     def get(self, request: Request, site_id: int) -> Response:
-        data = selectors.get_site_device_catalog(site_id)
-        # Merge dispatch overlay data into each catalog item
-        dispatch_map = {
-            d.device_id: d
-            for d in selectors.get_site_dispatch_all(site_id)
-        }
-        for item in data:
-            d = dispatch_map.get(item["id"])
-            item["vendor"]            = d.vendor if d else None
-            item["quantity_send"]     = d.qty_sent if d else None
-            item["tracking"]          = d.tracking if d else None
-            item["observations"]      = d.observations if d else None
-            item["dispatched_at"]     = d.dispatched_at.isoformat() if d and d.dispatched_at else None
-            item["qty_received"]      = d.qty_received if d else None
-            item["received_at"]       = d.received_at.isoformat() if d and d.received_at else None
-            item["receipt_photo_url"] = d.receipt_photo_url if d else None
-            item["installed"]         = d.installed if d else False
-            item["installed_at"]      = d.installed_at.isoformat() if d and d.installed_at else None
-            item["install_photo_url"] = d.install_photo_url if d else None
-            # Single derived field so the frontend stops guessing install state
-            # from device-name strings: installed → received → none.
-            item["physical_status"] = (
-                "installed" if (d and d.installed)
-                else "received" if (d and d.received_at)
-                else "none"
-            )
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(selectors.get_site_device_catalog(site_id), status=status.HTTP_200_OK)
 
 
 class SiteTopologyValidateView(APIView):
@@ -218,6 +192,55 @@ class SiteTopologyValidateView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
+class BomPreviewView(APIView):
+    """
+    POST /bom/preview/
+    Pure BOM aggregation for the active canvas design (no site binding).
+    Body: {devices: [{instanceId, numero, area, category, subtype, lensType, brand, name}]}
+    Response: {coverage_by_area, summary, total_cameras, total_views, total_devices}
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request) -> Response:
+        devices = request.data.get("devices") or []
+        result = selectors.get_bom_preview(devices)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class TopologyAnalyzeView(APIView):
+    """
+    POST /topology/analyze/
+
+    Full topology analysis not tied to a specific site (the design lives in
+    the SigProject JSON blob). Returns validate() result + build_tree +
+    cascade aggregates + optional connection_check.
+
+    Body: {
+      devices: [{id, category, subtype, poe_draw_watts, bandwidth_mbps,
+                 poe_budget_watts, uplink_mbps, port_count, ip}, ...],
+      connections: [{source_id, target_id}, ...],
+      check?: {source, target}        ← proposed new connection to pre-validate
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request) -> Response:
+        devices = request.data.get("devices") or []
+        connections_raw = request.data.get("connections") or []
+        check = request.data.get("check") or None
+
+        # Normalise connection keys: frontend sends source_id/target_id,
+        # topology.py expects source/target.
+        connections = [
+            {"source": c.get("source_id", c.get("source", "")),
+             "target": c.get("target_id", c.get("target", ""))}
+            for c in connections_raw
+        ]
+
+        result = services.analyze_topology(devices, connections, check)
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class SiteBOMView(APIView):
     """
     GET /sites/<site_id>/bom/
@@ -233,6 +256,39 @@ class SiteBOMView(APIView):
         if not selectors.get_site_or_404(site_id):
             return Response({"detail": "Site not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(selectors.get_site_bom(site_id), status=status.HTTP_200_OK)
+
+
+class SiteGeocodeView(APIView):
+    """
+    GET /sites/<site_id>/geocode/
+    Returns {lat, lng, source} for a site. If lat/lng not yet in DB, resolves
+    via Nominatim and persists. Returns 404 when the site is unknown or
+    geocoding fails entirely.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int) -> Response:
+        result = services.geocode_site(site_id)
+        if result is None:
+            return Response({"detail": "Could not geocode site."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class GeocodeSearchView(APIView):
+    """
+    GET /geocode/search/?q=<query>&limit=<n>
+    Server-side proxy for Nominatim address autocomplete. Cached 1 h.
+    Returns list of {lat, lon, display_name}.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        query = (request.query_params.get("q") or "").strip()
+        if not query:
+            return Response([], status=status.HTTP_200_OK)
+        limit = min(int(request.query_params.get("limit", 5) or 5), 10)
+        results = services.geocode_search(query, limit)
+        return Response(results, status=status.HTTP_200_OK)
 
 
 class CeoDashboardView(APIView):

@@ -164,3 +164,197 @@ def validate(devices, connections) -> dict:
             })
 
     return {"is_valid": not errors, "errors": errors, "switches": switches}
+
+
+# ─── Extended topology: tree + cascade + connection check ─────────────────────
+
+# Port of DEFAULT_NET_RULES (rules.ts)
+CONNECTION_RULES: dict[str, dict] = {
+    "router":         {"can_connect_to": ["switch", "firewall", "router", "nvr", "ap", "camera", "speaker", "radio", "pdu", "access-control", "other"]},
+    "switch":         {"can_connect_to": ["switch", "router", "camera", "ap", "speaker", "nvr", "firewall", "radio", "pdu", "access-control", "other"]},
+    "nvr":            {"can_connect_to": ["switch", "router", "camera", "radio"]},
+    "firewall":       {"can_connect_to": ["switch", "router"]},
+    "camera":         {"can_connect_to": []},
+    "ap":             {"can_connect_to": ["camera", "speaker", "access-control", "radio", "ap"]},
+    "speaker":        {"can_connect_to": []},
+    "pdu":            {"can_connect_to": []},
+    "radio":          {"can_connect_to": ["switch", "router", "camera", "ap", "radio", "other"]},
+    "access-control": {"can_connect_to": []},
+    "other":          {"can_connect_to": ["switch", "router", "camera", "ap", "speaker", "nvr", "firewall", "pdu", "radio", "access-control", "other"]},
+}
+
+# Subtype → topology node type (port of TopologyEngine.determineNodeType)
+_SUBTYPE_TO_NODE: dict[str, str] = {
+    "switch":            "switch",
+    "router":            "router",
+    "nvr":               "nvr",
+    "access-point":      "ap",
+    "speaker":           "speaker",
+    "pdu":               "pdu",
+    "radio":             "radio",
+    "subscriber-module": "radio",
+    "access-control":    "access-control",
+    "keyper":            "other",
+    "safe":              "other",
+    "viewing-station":   "other",
+}
+_CAMERA_SUBTYPES = {
+    "dome", "bullet", "ptz", "5mp-dome", "dual-dome", "multi-view", "4k-dome", "hybrid-thermal"
+}
+# BFS priority: lower = closer to root
+_NODE_PRIORITY = {
+    "router": 1, "firewall": 1, "nvr": 1,
+    "switch": 2,
+    "pdu": 3, "ap": 3, "radio": 3,
+}
+
+
+def node_type_of(device: dict) -> str:
+    """Map a device dict (with 'category' and 'subtype') to a topology node type."""
+    sub = (device.get("subtype") or "").lower()
+    cat = (device.get("category") or "").lower()
+    if cat == "camera" or sub in _CAMERA_SUBTYPES:
+        return "camera"
+    return _SUBTYPE_TO_NODE.get(sub, "other")
+
+
+def build_tree(devices: list[dict], connections: list[dict]) -> dict[str, dict]:
+    """
+    BFS spanning tree. Returns {node_id: {parent_id: str|None, children: list[str]}}.
+    Port of TopologyEngine.computeTree (TopologyEngine.ts:121-181).
+    """
+    by_id = {d["id"]: d for d in devices if d.get("id") is not None}
+    tree: dict[str, dict] = {nid: {"parent_id": None, "children": []} for nid in by_id}
+
+    adj: dict[str, list[str]] = {nid: [] for nid in by_id}
+    for c in connections:
+        s, t = c.get("source"), c.get("target")
+        if s in adj and t in adj:
+            adj[s].append(t)
+            adj[t].append(s)
+
+    visited: set[str] = set()
+    sorted_nodes = sorted(by_id.keys(), key=lambda nid: _NODE_PRIORITY.get(node_type_of(by_id[nid]), 4))
+
+    for root_id in sorted_nodes:
+        if root_id in visited:
+            continue
+        queue = [root_id]
+        visited.add(root_id)
+        while queue:
+            cur = queue.pop(0)
+            for nb in adj.get(cur, []):
+                if nb not in visited:
+                    visited.add(nb)
+                    tree[nb]["parent_id"] = cur
+                    tree[cur]["children"].append(nb)
+                    queue.append(nb)
+
+    return tree
+
+
+def _cascade_dfs(node_id: str, tree: dict, by_id: dict, result: dict) -> dict:
+    """DFS post-order: accumulate totals for node_id's subtree (excluding itself)."""
+    total_poe = 0.0
+    total_mbps = 0.0
+    downstream_ips = 0
+    total_devices = 0
+
+    for child_id in tree.get(node_id, {}).get("children", []):
+        child = by_id.get(child_id, {})
+        child_subtree = _cascade_dfs(child_id, tree, by_id, result)
+
+        total_poe += _num(child.get("poe_draw_watts")) + child_subtree["total_poe"]
+        total_mbps += _num(child.get("bandwidth_mbps")) + child_subtree["total_mbps"]
+        downstream_ips += (1 if child.get("ip") else 0) + child_subtree["downstream_ips"]
+        total_devices += 1 + child_subtree["total_devices"]
+
+    result[node_id] = {
+        "total_poe": round(total_poe, 3),
+        "total_mbps": round(total_mbps, 3),
+        "downstream_ips": downstream_ips,
+        "total_devices": total_devices,
+    }
+    return result[node_id]
+
+
+def cascade(devices: list[dict], connections: list[dict]) -> dict[str, dict]:
+    """
+    Compute downstream aggregates for every node in the tree.
+    Returns {node_id: {total_poe, total_mbps, downstream_ips, total_devices}}.
+    """
+    by_id = {d["id"]: d for d in devices if d.get("id") is not None}
+    tree = build_tree(devices, connections)
+    result: dict[str, dict] = {}
+    roots = [nid for nid, node in tree.items() if node["parent_id"] is None]
+    for root_id in roots:
+        _cascade_dfs(root_id, tree, by_id, result)
+    return result
+
+
+def check_connection(
+    source_id: str,
+    target_id: str,
+    devices: list[dict],
+    connections: list[dict],
+) -> dict | None:
+    """
+    Check whether adding a connection source→target is valid.
+    Port of TopologyEngine.validateNewConnection (TopologyEngine.ts:60-101).
+    Returns {'type': 'invalid_rule'|'duplicate'|'cycle', 'message': str} or None.
+    """
+    by_id = {d["id"]: d for d in devices if d.get("id") is not None}
+    src = by_id.get(source_id)
+    tgt = by_id.get(target_id)
+
+    if src is None or tgt is None:
+        return {"type": "invalid_rule", "message": "One or both devices do not exist."}
+
+    src_type = node_type_of(src)
+    tgt_type = node_type_of(tgt)
+
+    # 1. Rule check
+    allowed = CONNECTION_RULES.get(src_type, CONNECTION_RULES["other"])["can_connect_to"]
+    if tgt_type != "other" and tgt_type not in allowed:
+        return {
+            "type": "invalid_rule",
+            "message": f"A {src_type.upper()} cannot provide connection to a {tgt_type.upper()}.",
+        }
+
+    # 2. Duplicate check
+    for c in connections:
+        s, t = c.get("source"), c.get("target")
+        if (s == source_id and t == target_id) or (s == target_id and t == source_id):
+            return {"type": "duplicate", "message": "These devices are already connected."}
+
+    # 3. Cycle check — build the tree with existing connections and walk upward from source
+    tree = build_tree(devices, connections)
+    current = source_id
+    visited: set[str] = set()
+    while current:
+        if current == target_id:
+            return {"type": "cycle", "message": "This connection creates a network loop (cycle)."}
+        if current in visited:
+            break
+        visited.add(current)
+        current = tree.get(current, {}).get("parent_id")  # type: ignore[assignment]
+
+    return None
+
+
+def analyze(devices: list[dict], connections: list[dict], check: dict | None = None) -> dict:
+    """
+    Full topology analysis.
+    Returns validate() result + 'tree' + 'cascades' + optional 'connection_check'.
+    """
+    result = validate(devices, connections)
+    result["tree"] = build_tree(devices, connections)
+    result["cascades"] = cascade(devices, connections)
+    if check is not None:
+        result["connection_check"] = check_connection(
+            check.get("source", ""),
+            check.get("target", ""),
+            devices,
+            connections,
+        )
+    return result
