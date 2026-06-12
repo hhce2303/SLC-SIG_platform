@@ -36,6 +36,7 @@ urlpatterns = [
     path("sites/<int:site_id>/catalog/", views.SiteDeviceCatalogView.as_view(), name="site-device-catalog"),
     path("sites/<int:site_id>/topology/validate/", views.SiteTopologyValidateView.as_view(), name="site-topology-validate"),
     path("sites/<int:site_id>/bom/", views.SiteBOMView.as_view(), name="site-bom"),
+    path("sites/<int:site_id>/geocode/", views.SiteGeocodeView.as_view(), name="site-geocode"),
     path("sites/<int:site_id>/indoor-maps/", views.SiteIndoorMapView.as_view(), name="site-indoor-maps"),
     path("sites/<int:site_id>/indoor-maps/<int:map_id>/", views.SiteIndoorMapDetailView.as_view(), name="site-indoor-map-detail"),
 
@@ -77,6 +78,15 @@ urlpatterns = [
     # --- Real-time SSE (async, Redis pub/sub) ---
     path("stream/", views.installations_sse_stream, name="installations-sse-stream"),
     path("projects/stream/", views.projects_sse_stream, name="projects-sse-stream"),
+
+    # --- Geocoding proxy ---
+    path("geocode/search/", views.GeocodeSearchView.as_view(), name="geocode-search"),
+
+    # --- BOM preview (design-time, not site-bound) ---
+    path("bom/preview/", views.BomPreviewView.as_view(), name="bom-preview"),
+
+    # --- Topology analysis (design-time, not site-bound) ---
+    path("topology/analyze/", views.TopologyAnalyzeView.as_view(), name="topology-analyze"),
 
     # --- Dashboard init (unified first-load payload) ---
     path("dashboard-init/", views.DashboardInitView.as_view(), name="dashboard-init"),

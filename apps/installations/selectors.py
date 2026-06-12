@@ -13,6 +13,7 @@ from typing import Any
 from django.db import connections
 
 from apps.core import cache_utils as cu
+from apps.installations.catalog_enrichment import enrich_catalog_item, enrich_camera_item, enrich_network_item
 from apps.sigtools.models import (
     CameraModel,
     CustomerGroup,
@@ -88,12 +89,23 @@ def _compute_camera_catalog() -> list[dict]:
 
 def get_device_types() -> list[dict]:
     def _compute():
-        return list(
+        rows = list(
             DeviceType.objects.using(_DB)
             .order_by("device_type", "brand", "model")
             .values("id", "device_type", "brand", "model")
         )
-    return cu.cached("inst:catalog:device_types", _compute, cu.TTL_CATALOG)
+        return [
+            enrich_network_item({
+                "id": f"dev-{row['id']}",
+                "name": row.get("model") or row.get("device_type") or "",
+                "brand": row.get("brand") or "",
+                "subtype": (row.get("device_type") or "").lower(),
+                "category": "static",
+                "isExistingInventory": False,
+            })
+            for row in rows
+        ]
+    return cu.cached("inst:catalog:device_types:v2", _compute, cu.TTL_CATALOG)
 
 
 def get_vms_catalog() -> list[str]:
@@ -455,11 +467,24 @@ def _compute_sites_dashboard() -> list[dict]:
         )
         location = ", ".join(filter(None, [row.get("city"), row.get("state_code")])) or None
         latest_note = note_entries[-1]["action"] if note_entries else None
+        site_status_str = row.get("site_status") or ""
+        if site_status_str:
+            is_operational = site_status_str.lower() in ("live", "live testing")
+        else:
+            # Fallback heuristic when site_status_id is not set
+            s = (row["status"] or "").lower()
+            is_operational = any(kw in s for kw in ("finalizad", "complet", "done", "finish", "closed", "activ", "live"))
+
+        logs_categorized = {
+            "installation": [e for e in log_entries if "install" in (e.get("action") or "").lower()],
+            "inventory":    [e for e in log_entries if "install" not in (e.get("action") or "").lower()],
+        }
         result.append({
             "id": row["id"],
             "name": row["name"],
             "status": row["status"] or None,
             "site_status": row.get("site_status") or None,
+            "is_operational": is_operational,
             "address": row["address"] or None,
             "location": location,
             "responsable": row["responsable"] or None,
@@ -467,6 +492,7 @@ def _compute_sites_dashboard() -> list[dict]:
             "notes": latest_note,
             "log": log_entries,
             "log_count": len(log_entries),
+            "logs_categorized": logs_categorized,
             "customer_group_id": row["customer_group_id"],
             "total_cameras": row.get("total_cameras"),
             "total_views": row.get("total_views"),
@@ -640,7 +666,7 @@ def get_camera_model_catalog() -> list[dict]:
     reuse the same TypeScript interface. serial and ip are always None
     because these are model definitions, not physical units.
     """
-    return cu.cached("inst:catalog:camera_model_catalog", _compute_camera_model_catalog, cu.TTL_CATALOG)
+    return cu.cached("inst:catalog:camera_model_catalog:v2", _compute_camera_model_catalog, cu.TTL_CATALOG)
 
 
 def _compute_camera_model_catalog() -> list[dict]:
@@ -662,22 +688,18 @@ def _compute_camera_model_catalog() -> list[dict]:
         rows = [dict(zip(cols, row)) for row in cur.fetchall()]
 
     return [
-        {
+        enrich_camera_item({
             "id": f"cam-{row['model_id']}",
             "name": row["name"],
-            "brand": (row["brand"] or "").upper(),
+            "brand": row["brand"] or "",
             "serial": None,
             "ip": None,
             "resolution": None,
             "type": row["type_desc"],
             "category": "camera",
             "subtype": (row["subtype"] or "").lower(),
-            "lensType": None,
-            "rango_lente_mm": None,
-            "rango_fov_grados": None,
-            "poe_watts": None,
-            "bandwidth_mbps": None,
-        }
+            "isExistingInventory": False,
+        })
         for row in rows
     ]
 
@@ -867,23 +889,98 @@ def get_site_bom(site_id: int) -> dict:
     }
 
 
+def get_bom_preview(devices: list[dict]) -> dict:
+    """
+    Pure BOM aggregation — port of helpers/report.ts generateBOMReport +
+    OnboardingModal.tsx computeCamerasAndViews.
+    Input devices: [{instanceId, numero, area, category, subtype, lensType, ...}]
+    Returns:
+      coverage_by_area: [{area, rows: [{area, device_type, numero, instance_id}]}]
+      summary:          [{device_type, qty, is_camera}]  (cameras first, then alpha)
+      total_cameras, total_views, total_devices
+    """
+    from apps.installations.catalog_enrichment import build_device_type_label, compute_cameras_and_views
+
+    sorted_devices = sorted(devices, key=lambda d: d.get("numero") or 0)
+
+    coverage_map: dict[str, list[dict]] = {}
+    type_count: dict[str, dict] = {}
+
+    for dev in sorted_devices:
+        area = (dev.get("area") or "Unassigned").strip() or "Unassigned"
+        device_type = build_device_type_label(dev)
+        is_camera = (dev.get("category") or "").lower() == "camera"
+
+        coverage_map.setdefault(area, []).append({
+            "area": area,
+            "device_type": device_type,
+            "numero": dev.get("numero"),
+            "instance_id": dev.get("instanceId"),
+        })
+
+        if device_type not in type_count:
+            type_count[device_type] = {"qty": 0, "is_camera": is_camera}
+        type_count[device_type]["qty"] += 1
+
+    # Sort areas: alphabetical, "Unassigned" last
+    sorted_areas = sorted(
+        coverage_map.items(),
+        key=lambda kv: ("\xff" if kv[0] == "Unassigned" else kv[0].lower()),
+    )
+
+    summary = sorted(
+        [{"device_type": k, "qty": v["qty"], "is_camera": v["is_camera"]} for k, v in type_count.items()],
+        key=lambda r: (0 if r["is_camera"] else 1, r["device_type"]),
+    )
+
+    cv = compute_cameras_and_views(devices)
+
+    return {
+        "coverage_by_area": [{"area": area, "rows": rows} for area, rows in sorted_areas],
+        "summary": summary,
+        "total_cameras": cv["cameras"],
+        "total_views": cv["views"],
+        "total_devices": len(devices),
+    }
+
+
 def get_site_device_catalog(site_id: int) -> list[dict]:
     """
     Unified device catalog for a site.
 
     Returns all cameras (one entry per physical unit) and all other devices
     (one entry per physical unit from other_devices) in a single flat list
-    with a consistent shape.  All fields that don't apply to a given device
-    type are returned as None so the frontend interface stays stable.
-
-    Serial numbers are enriched from inv_articles notes ([device:XXX] tags) so
-    the frontend never needs to download the full article list for this purpose.
+    with a consistent shape, fully enriched (lens specs, PoE, dispatch overlay).
 
     Order: cameras first (sorted by subtype/brand/name), then other devices
     sorted by device_type/brand/model.
     """
     catalog = _get_site_cameras_for_catalog(site_id) + _get_site_other_devices_for_catalog(site_id)
-    return _enrich_catalog_serials(catalog)
+    catalog = _enrich_catalog_serials(catalog)
+
+    # Merge dispatch overlay (physical status, qty_received, installed, etc.)
+    dispatch_map = {d.device_id: d for d in get_site_dispatch_all(site_id)}
+    for item in catalog:
+        d = dispatch_map.get(item["id"])
+        item["vendor"]            = d.vendor if d else None
+        item["quantity_send"]     = d.qty_sent if d else None
+        item["tracking"]          = d.tracking if d else None
+        item["observations"]      = d.observations if d else None
+        item["dispatched_at"]     = d.dispatched_at.isoformat() if d and d.dispatched_at else None
+        item["qty_received"]      = d.qty_received if d else None
+        item["received_at"]       = d.received_at.isoformat() if d and d.received_at else None
+        item["receipt_photo_url"] = d.receipt_photo_url if d else None
+        item["installed"]         = d.installed if d else False
+        item["installed_at"]      = d.installed_at.isoformat() if d and d.installed_at else None
+        item["install_photo_url"] = d.install_photo_url if d else None
+        item["physical_status"]   = (
+            "installed" if (d and d.installed)
+            else "received" if (d and d.received_at)
+            else "none"
+        )
+
+    # Apply enricher: populates lensType/ranges/poe_watts from subtype defaults
+    return [enrich_catalog_item(item) for item in catalog]
 
 
 def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
