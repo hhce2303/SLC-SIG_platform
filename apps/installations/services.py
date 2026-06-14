@@ -165,37 +165,49 @@ def _notify_project_approval_requested(*, project: dict, requester_name: str | N
         )
 
 
-def _notify_project_approval_cancelled(*, project: dict, requester_name: str | None, note: str) -> None:
-    admin_emails = _sigtools_admin_emails()
-    admin_user_ids = _sigtools_admin_user_ids()
+def _notify_project_approval_cancelled(
+    *,
+    project: dict,
+    requester_id: int | None,
+    canceller_name: str | None,
+    note: str,
+) -> None:
+    # The cancellation notice goes to the user who ORIGINALLY requested approval
+    # (so they learn it was cancelled) — NOT to the admins.
+    if not requester_id:
+        return
 
-    if admin_emails:
-        safe_name = escape(project.get("name") or "(sin nombre)")
-        safe_requester = escape(requester_name or "Usuario")
-        safe_note = escape(note or "")
+    requester = _sigtools_users_by_ids({requester_id}).get(requester_id, {})
+    requester_email = requester.get("email")
+
+    safe_name = escape(project.get("name") or "(sin nombre)")
+    safe_canceller = escape(canceller_name or "Un administrador")
+    safe_note = escape(note or "")
+
+    if requester_email:
         html = (
-            f"<p>Se canceló la solicitud de aprobación para el proyecto GIS <b>{safe_name}</b>.</p>"
-            f"<p>Cancelado por: <b>{safe_requester}</b></p>"
+            f"<p>Tu solicitud de aprobación para el proyecto GIS <b>{safe_name}</b> fue cancelada.</p>"
+            f"<p>Cancelada por: <b>{safe_canceller}</b></p>"
         )
         if safe_note:
             html += f"<p>Nota: {safe_note}</p>"
         _send_graph_mail_safe(
-            to_emails=admin_emails,
-            subject=f"[Installations] Approval request cancelled: {project.get('name')}",
+            to_emails=[requester_email],
+            subject=f"[Installations] Tu solicitud de aprobación fue cancelada: {project.get('name')}",
             html_content=html,
         )
 
-    if admin_user_ids:
-        _create_notifications_bulk(
-            recipient_ids=admin_user_ids,
-            title=f"Aprobación cancelada: {project.get('name', '')}",
-            message=(
-                f"{requester_name or 'Un usuario'} canceló la solicitud de aprobación para el proyecto "
-                f"'{project.get('name', '')}'. {('Nota: ' + note) if note else ''}"
-            ).strip(),
-            notif_type="approval_cancelled",
-            related_project_id=project.get("id"),
-        )
+    _create_notifications_bulk(
+        recipient_ids=[requester_id],
+        title=f"Solicitud cancelada: {project.get('name', '')}",
+        message=(
+            f"Tu solicitud de aprobación para el proyecto '{project.get('name', '')}' fue cancelada"
+            f"{(' por ' + canceller_name) if canceller_name else ''}."
+            f"{(' Nota: ' + note) if note else ''}"
+        ).strip(),
+        notif_type="approval_cancelled",
+        related_project_id=project.get("id"),
+    )
 
 
 def _notify_project_promoted_to_onboarding(
@@ -2143,15 +2155,24 @@ def cancel_sig_project_approval(
     except SigProject.DoesNotExist:
         return None
 
+    # Capture the original requester BEFORE clearing it — they receive the
+    # cancellation notice. `requested_by` is whoever performed the cancel (admin).
+    original_requester_id = project.approval_requested_by
+
     project.approval_status = "draft"
     project.approval_requested_by = None
     project.save(update_fields=["approval_status", "approval_requested_by", "updated_at"])
 
     result = _project_to_dict(project)
-    requester_name = _sigtools_users_by_ids({requested_by}).get(requested_by, {}).get("name") if requested_by else None
+    canceller_name = _sigtools_users_by_ids({requested_by}).get(requested_by, {}).get("name") if requested_by else None
 
     transaction.on_commit(
-        lambda: _notify_project_approval_cancelled(project=result, requester_name=requester_name, note=note),
+        lambda: _notify_project_approval_cancelled(
+            project=result,
+            requester_id=original_requester_id,
+            canceller_name=canceller_name,
+            note=note,
+        ),
     )
     transaction.on_commit(lambda: _publish_project(result))
     return result
