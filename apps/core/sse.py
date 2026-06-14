@@ -31,20 +31,29 @@ MSG_TIMEOUT = 1.0    # máximo tiempo bloqueado esperando un mensaje Redis
 @sync_to_async
 def _resolve_user(request) -> bool:
     """
-    Valida la identidad del cliente SSE UNA vez al abrir la conexión.
+    Valida la identidad del cliente SSE al abrir la conexión.
     Acepta dos mecanismos (en orden de prioridad):
-      1. Cookie sig_token  → valida via Sanctum (SigtoolsCookieAuthentication)
-      2. JWT Bearer        → valida via simplejwt (DailyUser)
+      1. Cookie sig_token  → vía SigtoolsCookieAuthentication (cacheada en Redis
+         60s, el mismo path que usa toda la API). CRÍTICO: el EventSource se
+         reconecta seguido; validar el token contra la BD remota en cada intento
+         (token_utils.validate_token sin caché) provocaba 401 intermitentes y
+         mataba el tiempo real. Reusar el autenticador cacheado lo evita.
+      2. JWT Bearer        → valida via simplejwt.
     Retorna True si autenticado, False si no.
     """
-    # --- 1. Cookie Sigtools ---
+    # --- 1. Cookie Sigtools (cacheada) ---
     cookie_name = getattr(settings, "SIGTOOLS_COOKIE_NAME", "sig_token")
-    client_token = request.COOKIES.get(cookie_name)
-    if client_token:
-        from apps.sigtools_auth import token_utils
-        pat = token_utils.validate_token(client_token)
-        if pat is not None:
-            return True
+    if request.COOKIES.get(cookie_name):
+        from rest_framework.exceptions import AuthenticationFailed
+        from apps.sigtools_auth.authentication import SigtoolsCookieAuthentication
+        try:
+            if SigtoolsCookieAuthentication().authenticate(request) is not None:
+                return True
+        except AuthenticationFailed:
+            return False
+        except Exception:
+            logger.exception("SSE cookie auth error")
+            return False
 
     # --- 2. JWT Bearer ---
     auth_header = request.META.get("HTTP_AUTHORIZATION", "")
