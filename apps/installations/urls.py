@@ -11,6 +11,7 @@ urlpatterns = [
     path("catalog/devices/", views.DeviceCatalogView.as_view(), name="catalog-devices"),
     path("catalog/vms/", views.VMSCatalogView.as_view(), name="catalog-vms"),
     path("catalog/installation-types/", views.InstallationTypesCatalogView.as_view(), name="catalog-installation-types"),
+    path("catalog/by-ids/", views.CatalogByIdsView.as_view(), name="catalog-by-ids"),
 
     # --- Customer groups ---
     path("customer-groups/", views.CustomerGroupsView.as_view(), name="customer-groups"),

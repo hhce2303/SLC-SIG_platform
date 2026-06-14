@@ -60,17 +60,19 @@ def _resolve_user(request) -> bool:
     return False
 
 
-async def sse_stream(channel: str, request) -> HttpResponse:
+async def sse_stream(channels: "str | list[str]", request) -> HttpResponse:
     """
     Autentica al cliente y devuelve un StreamingHttpResponse text/event-stream,
-    o un 401 si no está autenticado.
+    o un 401 si no está autenticado. `channels` puede ser un canal único (str)
+    o varios (list) — el stream multiplexa todos en una sola conexión.
     """
     authenticated = await _resolve_user(request)
     if not authenticated:
         return HttpResponse(status=401)
 
+    chans = [channels] if isinstance(channels, str) else list(channels)
     response = StreamingHttpResponse(
-        _event_generator(channel, request),
+        _event_generator(chans, request),
         content_type="text/event-stream",
     )
     response["Cache-Control"] = "no-cache"
@@ -93,10 +95,10 @@ async def _client_disconnected(request) -> bool:
         return False
 
 
-async def _event_generator(channel: str, request):
+async def _event_generator(channels: list[str], request):
     client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     pubsub = client.pubsub()
-    await pubsub.subscribe(channel)
+    await pubsub.subscribe(*channels)
     last_beat = time.monotonic()
 
     try:
@@ -118,7 +120,7 @@ async def _event_generator(channel: str, request):
                     env = json.loads(msg["data"])
                     yield f"event: {env['event']}\ndata: {json.dumps(env['data'])}\n\n"
                 except (KeyError, json.JSONDecodeError) as exc:
-                    logger.warning("sse bad message on %s: %s", channel, exc)
+                    logger.warning("sse bad message on %s: %s", channels, exc)
 
             now = time.monotonic()
             if now - last_beat >= HEARTBEAT_SECS:
@@ -132,7 +134,7 @@ async def _event_generator(channel: str, request):
         raise  # re-propagar después del finally
     finally:
         try:
-            await pubsub.unsubscribe(channel)
+            await pubsub.unsubscribe(*channels)
             await pubsub.aclose()
             await client.aclose()
         except Exception:

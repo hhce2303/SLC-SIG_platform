@@ -985,16 +985,15 @@ def get_site_device_catalog(site_id: int) -> list[dict]:
 
 def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
     """
-    For any catalog item where serial is None, look up inv_articles.device_id
-    (an indexed column) to find a matching article and copy its serial over.
-
-    Uses WHERE device_id IN (...) — fully indexed, no full scan.
+    Look up inv_articles.device_id for every catalog item and overwrite the
+    serial with the inventory value when one exists.  inv_articles is the
+    canonical source — it wins over whatever cameras/other_devices.serial
+    contains (which may be a stale placeholder like "PENDING").
     """
-    needs_serial = [item for item in catalog if not item.get("serial")]
-    if not needs_serial:
+    device_ids = [item["id"] for item in catalog if item.get("id")]
+    if not device_ids:
         return catalog
 
-    device_ids = [item["id"] for item in needs_serial]
     placeholders = ",".join(["%s"] * len(device_ids))
     with connections["default"].cursor() as cur:
         cur.execute(
@@ -1007,8 +1006,8 @@ def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
     if not device_serial_map:
         return catalog
 
-    for item in needs_serial:
-        found = device_serial_map.get(item["id"])
+    for item in catalog:
+        found = device_serial_map.get(item.get("id"))
         if found:
             item["serial"] = found
 
@@ -1065,6 +1064,63 @@ def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
         }
         for row in rows
     ]
+
+
+def get_cameras_by_ids(camera_ids: list[int]) -> list[dict]:
+    """
+    Return enriched catalog items for specific camera IDs regardless of which site
+    they belong to. Used as a supplemental fetch when a project contains devices
+    whose catalogoId is not covered by the current site's catalog.
+    """
+    if not camera_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(camera_ids))
+    sql = f"""
+        SELECT
+            c.id           AS camera_id,
+            c.serial       AS serial,
+            cm.name        AS name,
+            cb.Name        AS brand,
+            ct.name        AS subtype,
+            ct.description AS type_desc,
+            d.address      AS ip,
+            v.View_name    AS view_name
+        FROM cameras c
+        JOIN camera_models cm  ON c.camera_model_id = cm.id
+        JOIN camera_brands cb  ON cm.camera_brand_id = cb.id
+        JOIN camera_types  ct  ON cm.camera_type_id  = ct.id
+        LEFT JOIN devices  d   ON c.device_id        = d.id
+        LEFT JOIN views    v   ON v.camera_id = c.id AND v.deleted_at IS NULL
+        WHERE c.id IN ({placeholders}) AND c.deleted_at IS NULL
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, camera_ids)
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    catalog = [
+        {
+            "id": f"cam-{row['camera_id']}",
+            "name": row["name"],
+            "brand": (row["brand"] or "").upper(),
+            "serial": row["serial"] or None,
+            "ip": row["ip"] or None,
+            "resolution": None,
+            "type": row["type_desc"] or None,
+            "category": "camera",
+            "subtype": (row["subtype"] or "").lower(),
+            "lensType": None,
+            "rango_lente_mm": None,
+            "rango_fov_grados": None,
+            "poe_watts": None,
+            "bandwidth_mbps": None,
+            "poe_budget_watts": None,
+            "uplink_mbps": None,
+            "view_name": row["view_name"] or None,
+        }
+        for row in rows
+    ]
+    return _enrich_catalog_serials(catalog)
 
 
 def _get_site_other_devices_for_catalog(site_id: int) -> list[dict]:

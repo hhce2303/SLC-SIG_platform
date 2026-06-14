@@ -45,15 +45,17 @@ def _sigtools_users_by_ids(user_ids: set[int]) -> dict[int, dict[str, Any]]:
 
 
 def _sigtools_admin_emails() -> list[str]:
+    # Admin membership lives in the app-level RBAC tables (user_app_roles / app_roles),
+    # which is what /me and the admin panel use — NOT the legacy user_roles/roles.
     sql = """
         SELECT DISTINCT u.email
         FROM users u
-        JOIN user_roles ur ON ur.user_id = u.id
-        JOIN roles r ON r.id = ur.role_id
+        JOIN user_app_roles uar ON uar.user_id = u.id
+        JOIN app_roles ar ON ar.id = uar.role_id
         WHERE u.deleted_at IS NULL
           AND u.email IS NOT NULL
           AND u.email <> ''
-          AND r.name = 'Admin'
+          AND ar.name = 'Admin'
     """
     with connections[_DB].cursor() as cur:
         cur.execute(sql)
@@ -62,13 +64,16 @@ def _sigtools_admin_emails() -> list[str]:
 
 def _sigtools_admin_user_ids() -> list[int]:
     """Return user IDs of all Admin-role sigtools users (for in-app notifications)."""
+    # Must match the RBAC source used by auth (user_app_roles / app_roles); querying
+    # the legacy user_roles/roles returned no admins, so approval notifications were
+    # never created.
     sql = """
         SELECT DISTINCT u.id
         FROM users u
-        JOIN user_roles ur ON ur.user_id = u.id
-        JOIN roles r ON r.id = ur.role_id
+        JOIN user_app_roles uar ON uar.user_id = u.id
+        JOIN app_roles ar ON ar.id = uar.role_id
         WHERE u.deleted_at IS NULL
-          AND r.name = 'Admin'
+          AND ar.name = 'Admin'
     """
     with connections[_DB].cursor() as cur:
         cur.execute(sql)
@@ -1394,8 +1399,18 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
                         [new_device_id, row_id],
                     )
 
-    # Fetch created devices and emit SSE events for real-time sync
+    # Fetch created devices and emit SSE events for real-time sync.
+    # Also build id_remap: {canvas instanceId -> new "cam-<id>"/"device-<id>"} via
+    # canvas_instance_id, so the frontend can repoint each design device's
+    # catalogoId to the row that now backs it at this site. Without this the
+    # design keeps referencing the source catalog IDs and won't render once
+    # reopened with the destination site's catalog.
     created_device_ids = []
+    id_remap: dict[str, str] = {}
+    all_instance_ids = [
+        (d.get("instanceId") or d.get("id")) for d in all_devices
+        if (d.get("instanceId") or d.get("id"))
+    ]
     try:
         with connections[_DB].cursor() as cur:
             if camera_params:
@@ -1412,6 +1427,25 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
                 )
                 for row in cur.fetchall():
                     created_device_ids.append(f"device-{row[0]}")
+
+            if all_instance_ids:
+                ph = ",".join(["%s"] * len(all_instance_ids))
+                cur.execute(
+                    f"SELECT canvas_instance_id, id FROM cameras "
+                    f"WHERE installation_id = %s AND canvas_instance_id IN ({ph}) AND deleted_at IS NULL",
+                    [installation_id, *all_instance_ids],
+                )
+                for canvas_iid, cam_id in cur.fetchall():
+                    if canvas_iid:
+                        id_remap[canvas_iid] = f"cam-{cam_id}"
+                cur.execute(
+                    f"SELECT canvas_instance_id, id FROM other_devices "
+                    f"WHERE installation_id = %s AND canvas_instance_id IN ({ph}) AND deleted_at IS NULL",
+                    [installation_id, *all_instance_ids],
+                )
+                for canvas_iid, dev_id in cur.fetchall():
+                    if canvas_iid:
+                        id_remap[canvas_iid] = f"device-{dev_id}"
     except Exception as exc:
         logger.warning("[export] failed to fetch created devices for SSE: %s", exc)
 
@@ -1428,6 +1462,7 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
         "skipped": skipped,
         "numbering": numbering,
         "renumbered": renumbered,
+        "id_remap": id_remap,
     }
 
 
@@ -2041,6 +2076,9 @@ def delete_sig_project(project_id: str) -> bool:
     from apps.installations.models import SigProject
 
     deleted_count, _ = SigProject.objects.filter(pk=project_id).delete()
+    if deleted_count > 0:
+        # Realtime: let other tabs drop it from their project list.
+        _rt_publish(CH_PROJECTS, "project_deleted", {"id": str(project_id)})
     return deleted_count > 0
 
 
@@ -2386,12 +2424,23 @@ from apps.installations.models import SiteDeviceDispatch, SiteDeviceLog  # noqa:
 
 
 def _publish_dispatch(dispatch: "SiteDeviceDispatch") -> None:
+    # Push the site's freshly-recomputed aggregate progress INSIDE the event so
+    # the front-end updates its dashboard from the stream alone — no follow-up
+    # HTTP fetch (the old SSE→refetch behaved like polling under load).
+    progress = None
+    try:
+        from apps.installations.selectors import get_all_sites_dispatch_progress
+        rows = get_all_sites_dispatch_progress([dispatch.site_id])
+        progress = rows[0] if rows else None
+    except Exception:
+        progress = None
     _rt_publish(CH_INSTALLATIONS, "dispatch_updated", [{
         "site_id":      dispatch.site_id,
         "device_id":    dispatch.device_id,
         "installed":    dispatch.installed,
         "qty_received": dispatch.qty_received,
         "qty_sent":     dispatch.qty_sent,
+        "progress":     progress,
     }])
 
 

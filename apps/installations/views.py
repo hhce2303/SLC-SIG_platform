@@ -164,6 +164,31 @@ class SiteDeviceCatalogView(APIView):
         return Response(selectors.get_site_device_catalog(site_id), status=status.HTTP_200_OK)
 
 
+class CatalogByIdsView(APIView):
+    """
+    GET /catalog/by-ids/?ids=cam-168,cam-165
+
+    Supplemental catalog fetch: returns enriched catalog items for specific
+    device IDs (e.g. cam-168) regardless of which site they belong to.
+    Used by the frontend when a project contains devices whose catalogoId is
+    not covered by the current site's catalog (e.g. cameras placed in a
+    previous session from a different site).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        ids_param = request.query_params.get("ids", "")
+        raw_ids = [i.strip() for i in ids_param.split(",") if i.strip()]
+        camera_ids = []
+        for raw in raw_ids:
+            if raw.startswith("cam-"):
+                try:
+                    camera_ids.append(int(raw[4:]))
+                except ValueError:
+                    pass
+        return Response(selectors.get_cameras_by_ids(camera_ids), status=status.HTTP_200_OK)
+
+
 class SiteTopologyValidateView(APIView):
     """
     POST /sites/<site_id>/topology/validate/
@@ -1121,16 +1146,18 @@ async def installations_sse_stream(request):
 async def projects_sse_stream(request):
     """
     GET /api/v1/installations/projects/stream/
-    Server-Sent Events: escucha el canal Redis rt:projects.
+    Server-Sent Events: bus UNIFICADO del front-end. Multiplexa los 3 canales
+    Redis en una sola conexión EventSource (el front se conecta solo a este
+    endpoint vía syncBus.ts), así recibe TODOS los eventos:
 
-    Eventos:
-      project_updated      — SigProject (BD local) cambió
-      installation_updated — installations en sigtools
-      project_site_updated — project_sites en sigtools
+      rt:projects      → project_updated/created/deleted, installation_updated, project_site_updated
+      rt:installations → dispatch_updated, site_updated, device_status_changed,
+                         device_received, device_installed, activity_logged
+      rt:inventory     → article_updated
     """
-    from apps.core.realtime import CH_PROJECTS
+    from apps.core.realtime import CH_INSTALLATIONS, CH_INVENTORY, CH_PROJECTS
     from apps.core.sse import sse_stream
-    return await sse_stream(CH_PROJECTS, request)
+    return await sse_stream([CH_PROJECTS, CH_INSTALLATIONS, CH_INVENTORY], request)
 
 
 # ---------------------------------------------------------------------------
