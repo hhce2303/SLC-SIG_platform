@@ -2179,6 +2179,90 @@ def cancel_sig_project_approval(
 
 
 # ===========================================================================
+# Client presentation "guest link" — public read-only share of a SigProject
+# ===========================================================================
+
+# Fields of a device exposed to the (untrusted) client view. Anything not here
+# is stripped — keep it to what's needed to RENDER the design, never internals.
+_PRESENTATION_DEVICE_FIELDS = (
+    "instanceId", "catalogoId", "numero", "displayLabel", "lat", "lng",
+    "rotacionBase", "area", "varifocal_mm", "ptz_orientacion", "ptz_zoom",
+    "alcance_metros", "sensorOverrides", "sitioId",
+)
+_PRESENTATION_SITIO_FIELDS = ("id", "nombre", "lat", "lng", "zoom")
+_PRESENTATION_DRAWING_FIELDS = (
+    "id", "type", "coordinates", "color", "label", "sitioId", "layer", "radius", "text",
+)
+
+
+def _pick(d: dict, fields) -> dict:
+    return {k: d[k] for k in fields if isinstance(d, dict) and k in d}
+
+
+def set_sig_project_presentation_token(*, project_id: str) -> str | None:
+    """Generate (or return the existing) guest-link token for a project."""
+    from apps.installations.models import SigProject
+    import uuid as _uuid
+
+    try:
+        project = SigProject.objects.get(pk=project_id)
+    except SigProject.DoesNotExist:
+        return None
+
+    if not project.presentation_token:
+        project.presentation_token = _uuid.uuid4()
+        project.save(update_fields=["presentation_token", "updated_at"])
+    return str(project.presentation_token)
+
+
+def revoke_sig_project_presentation_token(*, project_id: str) -> bool:
+    """Revoke the guest link (token → NULL). Returns False if not found."""
+    from apps.installations.models import SigProject
+
+    try:
+        project = SigProject.objects.get(pk=project_id)
+    except SigProject.DoesNotExist:
+        return False
+
+    project.presentation_token = None
+    project.save(update_fields=["presentation_token", "updated_at"])
+    return True
+
+
+def get_sig_project_presentation(*, token: str) -> dict | None:
+    """
+    Resolve a project by its guest-link token and return a SANITIZED read-only
+    payload (only what a client needs to view the design — no prices, no other
+    projects, no internal metadata). Returns None if the token is invalid or
+    revoked.
+    """
+    from apps.installations.models import SigProject
+    import uuid as _uuid
+
+    try:
+        token_uuid = _uuid.UUID(str(token))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+    project = SigProject.objects.filter(presentation_token=token_uuid).first()
+    if project is None:
+        return None
+
+    data = project.data or {}
+    sitios = [_pick(s, _PRESENTATION_SITIO_FIELDS) for s in (data.get("sitios") or []) if isinstance(s, dict)]
+    devices = [_pick(d, _PRESENTATION_DEVICE_FIELDS) for d in (data.get("devices") or []) if isinstance(d, dict)]
+    drawings = [_pick(dr, _PRESENTATION_DRAWING_FIELDS) for dr in (data.get("drawings") or []) if isinstance(dr, dict)]
+
+    return {
+        "id": str(project.id),
+        "name": project.name,
+        "sitios": sitios,
+        "devices": devices,
+        "drawings": drawings,
+    }
+
+
+# ===========================================================================
 # Admin — sigtools_beta (users, app_roles, permissions)
 # ===========================================================================
 

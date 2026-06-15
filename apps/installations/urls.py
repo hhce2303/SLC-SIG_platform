@@ -60,6 +60,10 @@ urlpatterns = [
     path("sig-projects/<uuid:project_id>/name/", views.SigProjectRenameView.as_view(), name="sig-project-rename"),
     path("sig-projects/<uuid:project_id>/request-approval/", views.SigProjectRequestApprovalView.as_view(), name="sig-project-request-approval"),
     path("sig-projects/<uuid:project_id>/cancel-approval-request/", views.SigProjectCancelApprovalView.as_view(), name="sig-project-cancel-approval-request"),
+    path("sig-projects/<uuid:project_id>/presentation-link/", views.SigProjectPresentationLinkView.as_view(), name="sig-project-presentation-link"),
+
+    # --- Public read-only client presentation (NO auth) ---
+    path("presentation/<uuid:token>/", views.PresentationDetailView.as_view(), name="presentation-detail"),
 
     # --- Admin (sigtools_beta) ---
     path("admin/users/", views.AdminUsersView.as_view(), name="admin-users"),

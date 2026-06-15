@@ -15,7 +15,7 @@ from django.views import View
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -823,6 +823,48 @@ class SigProjectCancelApprovalView(APIView):
         if project is None:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(project, status=status.HTTP_200_OK)
+
+
+class SigProjectPresentationLinkView(APIView):
+    """
+    Manage the read-only client "guest link" for a project (auth required).
+      POST   /sig-projects/<uuid>/presentation-link/  → generate/return token
+      DELETE /sig-projects/<uuid>/presentation-link/  → revoke (token → NULL)
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request, project_id) -> Response:
+        token = services.set_sig_project_presentation_token(project_id=str(project_id))
+        if token is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"token": token, "path": f"/presentation/{token}"},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request: Request, project_id) -> Response:
+        ok = services.revoke_sig_project_presentation_token(project_id=str(project_id))
+        if not ok:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PresentationDetailView(APIView):
+    """
+    PUBLIC, unauthenticated read-only view of a shared project.
+      GET /api/v1/installations/presentation/<token>/
+    Returns a sanitized payload (name + sitios + devices + drawings) or 404.
+    """
+
+    authentication_classes = []  # truly public — don't let cookie auth reject
+    permission_classes = [AllowAny]
+
+    def get(self, request: Request, token) -> Response:
+        data = services.get_sig_project_presentation(token=str(token))
+        if data is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(data, status=status.HTTP_200_OK)
 
 
 # ===========================================================================
