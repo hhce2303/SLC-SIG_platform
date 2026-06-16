@@ -52,3 +52,6 @@ graphify-out/
 export_database_complete.py
 sigtools_beta.sql
 *.sql.bak
+
+# Let's Encrypt runtime (certs/keys + ACME webroot) — never commit
+docker/certbot/

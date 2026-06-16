@@ -51,7 +51,9 @@ services:
     ports:
       - "${NGINX_PORT:-80}:80"
     volumes:
-      - ./nginx.conf/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # NGINX_CONF defaults to the plain HTTP config (local/dev).
+      # Prod sets NGINX_CONF=default.ssl.conf (see docker-compose.ssl.yml) for HTTPS.
+      - ./nginx.conf/${NGINX_CONF:-default.conf}:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/etc/nginx/certs:ro
       - media_data:/app/media:ro
     depends_on:
