@@ -867,6 +867,33 @@ class PresentationDetailView(APIView):
         return Response(data, status=status.HTTP_200_OK)
 
 
+class PresentationSignView(APIView):
+    """
+    PUBLIC, unauthenticated endpoint to record a client's electronic signature
+    on the proposal (ESIGN/UETA). The guest-link token is the authorization.
+      POST /api/v1/installations/presentation/<token>/sign/
+    Body: {signerName, signatureDataUrl, total, currency, governingState, ...}
+    Returns 200 on success, 404 if the token is invalid/revoked or payload bad.
+    """
+
+    authentication_classes = []  # truly public — don't let cookie auth reject
+    permission_classes = [AllowAny]
+
+    def post(self, request: Request, token) -> Response:
+        xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+        ip = (xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR")) or None
+        ua = request.META.get("HTTP_USER_AGENT", "")
+        ok = services.save_sig_project_presentation_signature(
+            token=str(token),
+            signature=request.data if isinstance(request.data, dict) else {},
+            ip=ip,
+            user_agent=ua,
+        )
+        if not ok:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"status": "signed"}, status=status.HTTP_200_OK)
+
+
 # ===========================================================================
 # Supabase — Admin
 # ===========================================================================

@@ -64,6 +64,7 @@ urlpatterns = [
 
     # --- Public read-only client presentation (NO auth) ---
     path("presentation/<uuid:token>/", views.PresentationDetailView.as_view(), name="presentation-detail"),
+    path("presentation/<uuid:token>/sign/", views.PresentationSignView.as_view(), name="presentation-sign"),
 
     # --- Admin (sigtools_beta) ---
     path("admin/users/", views.AdminUsersView.as_view(), name="admin-users"),

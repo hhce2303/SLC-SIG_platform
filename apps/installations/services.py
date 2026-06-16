@@ -2188,6 +2188,9 @@ _PRESENTATION_DEVICE_FIELDS = (
     "instanceId", "catalogoId", "numero", "displayLabel", "lat", "lng",
     "rotacionBase", "area", "varifocal_mm", "ptz_orientacion", "ptz_zoom",
     "alcance_metros", "sensorOverrides", "sitioId",
+    # Optional per-unit price for the client proposal/BOM. Absent today (the
+    # designer UI does not set it); the client view falls back to an estimate.
+    "price",
 )
 _PRESENTATION_SITIO_FIELDS = ("id", "nombre", "lat", "lng", "zoom")
 _PRESENTATION_DRAWING_FIELDS = (
@@ -2260,6 +2263,59 @@ def get_sig_project_presentation(*, token: str) -> dict | None:
         "devices": devices,
         "drawings": drawings,
     }
+
+
+# Max length of the base64 signature image we accept (~350 KB data URL). Guards
+# against an oversized/abusive payload on this public, unauthenticated endpoint.
+_SIGNATURE_DATAURL_MAX = 350_000
+
+
+def save_sig_project_presentation_signature(
+    *, token: str, signature: dict, ip: str | None = None, user_agent: str | None = None
+) -> bool:
+    """
+    Record a client's electronic signature (ESIGN/UETA) against the project
+    resolved by its guest-link token. Public/unauthenticated — the token is the
+    authorization. Returns False if the token is invalid/revoked or the payload
+    fails validation. Stores a sanitized record (whitelisted keys only).
+    """
+    from apps.installations.models import SigProject
+    from django.utils import timezone
+    import uuid as _uuid
+
+    try:
+        token_uuid = _uuid.UUID(str(token))
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+    if not isinstance(signature, dict):
+        return False
+
+    signer = str(signature.get("signerName", "")).strip()[:200]
+    data_url = signature.get("signatureDataUrl", "")
+    if not signer or not isinstance(data_url, str):
+        return False
+    if not data_url.startswith("data:image/") or len(data_url) > _SIGNATURE_DATAURL_MAX:
+        return False
+
+    project = SigProject.objects.filter(presentation_token=token_uuid).first()
+    if project is None:
+        return False
+
+    # Whitelisted, server-stamped record — never trust client-supplied metadata.
+    record = {
+        "signerName": signer,
+        "signatureDataUrl": data_url,
+        "signedAt": timezone.now().isoformat(),
+        "total": signature.get("total"),
+        "currency": str(signature.get("currency", "USD"))[:8],
+        "governingState": str(signature.get("governingState", ""))[:80],
+        "ip": ip,
+        "userAgent": (user_agent or "")[:400],
+    }
+    project.presentation_signature = record
+    project.save(update_fields=["presentation_signature", "updated_at"])
+    return True
 
 
 # ===========================================================================

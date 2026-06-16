@@ -37,6 +37,10 @@ class SigProject(models.Model):
     # Read-only client "guest link" token. NULL = no active share (revoked).
     # A public, unauthenticated endpoint resolves a project by this token.
     presentation_token = models.UUIDField(null=True, blank=True, default=None)
+    # Retained electronic signature record (ESIGN/UETA) for the client proposal.
+    # JSON: {signerName, signedAt, signatureDataUrl, total, currency,
+    # governingState, ip, userAgent}. NULL = not yet signed.
+    presentation_signature = models.JSONField(null=True, blank=True, default=None)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
