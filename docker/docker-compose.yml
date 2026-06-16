@@ -37,6 +37,7 @@ services:
     ]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - media_data:/app/media
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/"]
       interval: 30s
@@ -48,11 +49,11 @@ services:
     image: nginx:alpine
     container_name: SIGplatform-nginx
     ports:
-      - "8091:443"
-      - "80:80"
+      - "${NGINX_PORT:-80}:80"
     volumes:
       - ./nginx.conf/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/etc/nginx/certs:ro
+      - media_data:/app/media:ro
     depends_on:
       web:
         condition: service_healthy
@@ -76,3 +77,7 @@ services:
     healthcheck:
       disable: true
     command: ["python", "manage.py", "run_realtime_poller"]
+
+volumes:
+  # User-uploaded media (indoor floor-plan maps). Shared rw by web, ro by nginx.
+  media_data:

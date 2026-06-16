@@ -339,3 +339,37 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"[{self.type}] → user={self.recipient_id}: {self.title}"
+
+
+# ── Indoor floor-plan maps ───────────────────────────────────────────────────
+
+def indoor_map_upload_to(instance, filename: str) -> str:
+    """Store under MEDIA_ROOT/indoor-maps/<site_id>/<uuid>_<filename>."""
+    safe = filename.replace("/", "_").replace("\\", "_")
+    return f"indoor-maps/{instance.site_id}/{uuid.uuid4().hex}_{safe}"
+
+
+class SiteIndoorMap(models.Model):
+    """
+    Uploaded indoor floor-plan for a site (managed=True, sig_dailylogs).
+    The image is stored natively on local MEDIA_ROOT and served by nginx at
+    /media/ — replacing the old base64-in-payload approach that blew up
+    browser memory.
+    """
+
+    site_id      = models.BigIntegerField(db_index=True)
+    label        = models.CharField(max_length=255, blank=True, default="")
+    image        = models.FileField(upload_to=indoor_map_upload_to)
+    content_type = models.CharField(max_length=100, blank=True, default="")
+    size_bytes   = models.BigIntegerField(default=0)
+    uploaded_by  = models.BigIntegerField(null=True, blank=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = "installations"
+        db_table = "site_indoor_maps"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["site_id", "created_at"], name="indoor_map_site_idx")]
+
+    def __str__(self):
+        return f"IndoorMap site={self.site_id} {self.label}".strip()

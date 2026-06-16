@@ -71,6 +71,7 @@ class SiteDashboardItemSerializer(serializers.Serializer):
     name = serializers.CharField()
     customer_group_id = serializers.IntegerField(allow_null=True)
     status = serializers.CharField(allow_null=True)
+    site_status = serializers.CharField(allow_null=True, required=False)
     address = serializers.CharField(allow_null=True)
     location = serializers.CharField(allow_null=True)
     responsable = serializers.CharField(allow_null=True)
@@ -105,6 +106,59 @@ class SiteCreateSerializer(serializers.Serializer):
 
 class SiteCreateResponseSerializer(serializers.Serializer):
     site_id = serializers.IntegerField()
+
+
+class SiteUpdateSerializer(serializers.Serializer):
+    """
+    Editable core fields on a sigtools_beta.sites row.
+    All optional — PATCH applies only the provided fields; PUT behaves the
+    same way (the canonical site record lives in read-only sigtools_beta, so
+    there is no full-replace semantics to enforce here).
+    """
+    name                  = serializers.CharField(max_length=255, required=False)
+    ip_address            = serializers.CharField(max_length=250, required=False, allow_null=True, allow_blank=True)
+    city                  = serializers.CharField(max_length=255, required=False, allow_null=True, allow_blank=True)
+    state_code            = serializers.CharField(max_length=2, required=False, allow_null=True, allow_blank=True)
+    country_code          = serializers.CharField(max_length=2, required=False, allow_null=True, allow_blank=True)
+    address               = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    timezone              = serializers.CharField(max_length=50, required=False, allow_null=True, allow_blank=True)
+    monitored             = serializers.BooleanField(required=False)
+    maintenance           = serializers.BooleanField(required=False)
+    receive_notifications = serializers.BooleanField(required=False)
+    installation_date     = serializers.DateField(required=False, allow_null=True)
+    # Site lifecycle status NAME (site_statuses: Created/Installing/Live Testing/
+    # Live/Staging). update_site() maps it to sites.site_status_id.
+    status                = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    site_status           = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("Provide at least one field to update.")
+        return attrs
+
+
+class SiteDetailSerializer(serializers.Serializer):
+    """Read shape returned after a site update."""
+    id                    = serializers.IntegerField()
+    name                  = serializers.CharField()
+    ip_address            = serializers.CharField(allow_null=True)
+    city                  = serializers.CharField(allow_null=True)
+    state_code            = serializers.CharField(allow_null=True)
+    country_code          = serializers.CharField(allow_null=True)
+    address               = serializers.CharField(allow_null=True)
+    timezone              = serializers.CharField(allow_null=True)
+    monitored             = serializers.BooleanField()
+    maintenance           = serializers.BooleanField()
+    receive_notifications = serializers.BooleanField()
+    installation_date     = serializers.DateField(allow_null=True)
+    updated_at            = serializers.DateTimeField(allow_null=True)
+    status                = serializers.CharField(allow_null=True, required=False)
+    site_status           = serializers.CharField(allow_null=True, required=False)
+    site_status_id        = serializers.IntegerField(allow_null=True, required=False)
+    project_owner         = serializers.IntegerField(allow_null=True, required=False)
+    project_owner_name    = serializers.CharField(allow_null=True, required=False)
+    it_lead_tech_id       = serializers.IntegerField(allow_null=True, required=False)
+    it_lead_tech_name     = serializers.CharField(allow_null=True, required=False)
 
 
 class SiteStatusEntrySerializer(serializers.Serializer):
@@ -189,6 +243,167 @@ class SiteDeviceCatalogItemSerializer(serializers.Serializer):
     install_photo_url = serializers.CharField(allow_null=True, allow_blank=True)
     # Camera view assignment (null for non-camera devices)
     view_name         = serializers.CharField(allow_null=True)
+    # Physical install status derived from the dispatch overlay
+    # (installed → received → none). Lets the frontend stop guessing from
+    # device-name strings (e.g. matching "CAM 3").
+    physical_status   = serializers.ChoiceField(
+        choices=["installed", "received", "none"], default="none",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Topology validation (POST /sites/<id>/topology/validate/)
+# ---------------------------------------------------------------------------
+
+class TopologyDeviceSerializer(serializers.Serializer):
+    """A node in the canvas graph plus the catalog specs the frontend holds."""
+    id               = serializers.CharField()
+    type             = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    poe_draw_watts   = serializers.FloatField(required=False, allow_null=True)
+    poe_budget_watts = serializers.FloatField(required=False, allow_null=True)
+    bandwidth_mbps   = serializers.FloatField(required=False, allow_null=True)
+    uplink_mbps      = serializers.FloatField(required=False, allow_null=True)
+    port_count       = serializers.IntegerField(required=False, allow_null=True)
+
+
+class TopologyConnectionSerializer(serializers.Serializer):
+    source         = serializers.CharField()
+    target         = serializers.CharField()
+    type           = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    bandwidth_mbps = serializers.FloatField(required=False, allow_null=True)
+
+
+class TopologyValidateRequestSerializer(serializers.Serializer):
+    devices     = TopologyDeviceSerializer(many=True)
+    connections = TopologyConnectionSerializer(many=True, default=list)
+
+
+class TopologyErrorSerializer(serializers.Serializer):
+    code      = serializers.CharField()   # loop_detected | poe_budget_exceeded | bandwidth_exceeded | ports_exceeded
+    message   = serializers.CharField()
+    device_id = serializers.CharField(required=False, allow_null=True)
+    nodes     = serializers.ListField(child=serializers.CharField(), required=False)
+
+
+class TopologySwitchStatSerializer(serializers.Serializer):
+    device_id           = serializers.CharField()
+    poe_used_watts      = serializers.FloatField()
+    poe_budget_watts    = serializers.FloatField(allow_null=True)
+    poe_remaining_watts = serializers.FloatField(allow_null=True)
+    bandwidth_used_mbps = serializers.FloatField()
+    uplink_mbps         = serializers.FloatField(allow_null=True)
+    ports_used          = serializers.IntegerField()
+    port_count          = serializers.IntegerField(allow_null=True)
+
+
+class TopologyValidateResponseSerializer(serializers.Serializer):
+    is_valid = serializers.BooleanField()
+    errors   = TopologyErrorSerializer(many=True)
+    switches = TopologySwitchStatSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
+# Bill of Materials (GET /sites/<id>/bom/)
+# ---------------------------------------------------------------------------
+
+class BOMItemSerializer(serializers.Serializer):
+    category  = serializers.CharField()
+    subtype   = serializers.CharField()
+    brand     = serializers.CharField(allow_null=True, allow_blank=True)
+    name      = serializers.CharField()
+    qty       = serializers.IntegerField()
+    is_camera = serializers.BooleanField()
+
+
+class BOMResponseSerializer(serializers.Serializer):
+    site_id             = serializers.IntegerField()
+    total_cameras       = serializers.IntegerField()
+    total_other_devices = serializers.IntegerField()
+    total_devices       = serializers.IntegerField()
+    items               = BOMItemSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
+# CEO dashboard (GET /metrics/ceo-dashboard/)
+# ---------------------------------------------------------------------------
+
+class CeoDashboardProjectSerializer(serializers.Serializer):
+    site_id           = serializers.IntegerField()
+    site_name         = serializers.CharField()
+    customer_group_id = serializers.IntegerField(allow_null=True)
+    customer_group    = serializers.CharField(allow_null=True)
+    status            = serializers.CharField(allow_null=True)
+    project_owner     = serializers.CharField(allow_null=True)
+    starting_date     = serializers.DateTimeField(allow_null=True)
+    limit_date        = serializers.DateTimeField(allow_null=True)
+    total_devices     = serializers.IntegerField()
+    installed         = serializers.IntegerField()
+    progress_pct      = serializers.FloatField()
+    time_used_pct     = serializers.FloatField(allow_null=True)
+    has_delay_alerts  = serializers.BooleanField()
+    health            = serializers.ChoiceField(choices=["on_track", "watch", "behind_schedule"])
+
+
+class CeoDashboardSummarySerializer(serializers.Serializer):
+    total_projects       = serializers.IntegerField()
+    on_track             = serializers.IntegerField()
+    watch                = serializers.IntegerField()
+    behind_schedule      = serializers.IntegerField()
+    total_devices        = serializers.IntegerField()
+    total_installed      = serializers.IntegerField()
+    overall_progress_pct = serializers.FloatField()
+
+
+class CeoDashboardResponseSerializer(serializers.Serializer):
+    summary  = CeoDashboardSummarySerializer()
+    projects = CeoDashboardProjectSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
+# Indoor maps (POST/GET /sites/<id>/indoor-maps/)
+# ---------------------------------------------------------------------------
+
+class SiteIndoorMapUploadSerializer(serializers.Serializer):
+    """multipart/form-data upload of an indoor floor-plan."""
+    ALLOWED_CONTENT_TYPES = {
+        "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif", "application/pdf",
+    }
+    MAX_BYTES = 50 * 1024 * 1024  # keep in sync with nginx client_max_body_size
+
+    image = serializers.FileField()
+    label = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+    def validate_image(self, f):
+        ct = (getattr(f, "content_type", "") or "").lower()
+        if ct not in self.ALLOWED_CONTENT_TYPES:
+            raise serializers.ValidationError(
+                f"Unsupported file type '{ct}'. Allowed: PNG, JPEG, WebP, GIF, PDF."
+            )
+        size = getattr(f, "size", 0) or 0
+        if size > self.MAX_BYTES:
+            raise serializers.ValidationError(
+                f"File too large ({size} bytes). Max {self.MAX_BYTES} bytes."
+            )
+        return f
+
+
+class SiteIndoorMapSerializer(serializers.Serializer):
+    """Read shape for an uploaded indoor map (returns an absolute URL)."""
+    id           = serializers.IntegerField()
+    site_id      = serializers.IntegerField()
+    label        = serializers.CharField(allow_blank=True)
+    url          = serializers.SerializerMethodField()
+    content_type = serializers.CharField(allow_blank=True)
+    size_bytes   = serializers.IntegerField()
+    uploaded_by  = serializers.IntegerField(allow_null=True)
+    created_at   = serializers.DateTimeField()
+
+    def get_url(self, obj):
+        if not obj.image:
+            return None
+        url = obj.image.url
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request is not None else url
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +451,9 @@ class SiteOnboardingSerializer(serializers.Serializer):
     total_devices_planned = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     starting_date = serializers.DateTimeField(required=False, allow_null=True)
     limit_date = serializers.DateTimeField(required=False, allow_null=True)
+    # Site lifecycle status NAME (site_statuses). Defaults to Installing in the
+    # service when omitted — a site sent to installation enters that phase.
+    status = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
 class SiteOnboardingResponseSerializer(serializers.Serializer):
@@ -273,8 +491,14 @@ class DeviceExportSerializer(serializers.Serializer):
     instanceId = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     catalogoId = serializers.CharField(required=False, allow_null=True)
+    # Physical inventory id of an EXISTING device (cameras/other_devices PK) so the
+    # backend UPDATEs it instead of inserting a duplicate. Was previously absent
+    # here, so DRF silently dropped it and every device took the INSERT path.
+    inventory_id = serializers.IntegerField(required=False, allow_null=True)
     category = serializers.CharField(default="other")
     networkDeviceId = serializers.IntegerField(required=False, allow_null=True)
+    # Device IP entered on the canvas → persisted to the linked devices.address.
+    ip = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     area = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     view_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     numero = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -292,7 +516,8 @@ class DeviceExportSerializer(serializers.Serializer):
 
 
 class InventoryExportSerializer(serializers.Serializer):
-    installation_id = serializers.IntegerField()
+    site_id = serializers.IntegerField(required=False, allow_null=True)
+    installation_id = serializers.IntegerField(required=False, allow_null=True)
     sitio = SitioExportSerializer(required=False, allow_null=True)
     projectName = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     devices = DeviceExportSerializer(many=True, default=list)
@@ -713,15 +938,17 @@ class ProjectSiteInfoSerializer(serializers.Serializer):
 
 
 class ProjectSiteInfoUpdateSerializer(serializers.Serializer):
-    name                 = serializers.CharField(max_length=255, required=False)
-    city                 = serializers.CharField(max_length=255, required=False, allow_null=True)
-    state_code           = serializers.CharField(max_length=2, required=False, allow_null=True)
-    country_code         = serializers.CharField(max_length=2, required=False, allow_null=True)
-    address              = serializers.CharField(required=False, allow_null=True)
-    ip_address           = serializers.CharField(max_length=250, required=False, allow_null=True)
+    # allow_blank on the text fields: the Project Info editor sends "" for any
+    # optional field the user left empty; without it DRF 400s ("may not be blank").
+    name                 = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    city                 = serializers.CharField(max_length=255, required=False, allow_null=True, allow_blank=True)
+    state_code           = serializers.CharField(max_length=2, required=False, allow_null=True, allow_blank=True)
+    country_code         = serializers.CharField(max_length=2, required=False, allow_null=True, allow_blank=True)
+    address              = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    ip_address           = serializers.CharField(max_length=250, required=False, allow_null=True, allow_blank=True)
     contract_value       = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
-    hotel                = serializers.CharField(required=False, allow_null=True)
-    flight_details       = serializers.CharField(required=False, allow_null=True)
+    hotel                = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    flight_details       = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     it_lead_tech_id      = serializers.IntegerField(required=False, allow_null=True)
     project_owner        = serializers.IntegerField(required=False, allow_null=True)
     installation_type_id = serializers.IntegerField(required=False, allow_null=True)

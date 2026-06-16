@@ -11,6 +11,7 @@ venv/
 # Environment
 .env
 !.env.example
+docker/.env
 
 # Django
 db.sqlite3
@@ -35,6 +36,38 @@ build/
 
 # Logs
 *.log
+
+# DB backups
+backups/
+
+# Graphify
+.graphify/
+graphify-out/
+
+# Agents
+.agents/
+.claude
+
+# DB snapshots — contain production data, never commit
+export_database_complete.py
+sigtools_beta.sql
+*.sql.bak
+
+# DB backups
+backups/
+
+# Graphify
+.graphify/
+graphify-out/
+
+# Agents
+.agents/
+.claude
+
+# DB snapshots — contain production data, never commit
+export_database_complete.py
+sigtools_beta.sql
+*.sql.bak
 
 .sigtools_beta.sql
 sigtools_beta.sql

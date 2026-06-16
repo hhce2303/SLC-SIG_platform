@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -338,23 +339,27 @@ def create_site_with_installation(data: dict) -> dict:
     _PROJECT_OWNER_DEFAULT = None
 
     with transaction.atomic(using=_DB):
-        # 1. Resolve Active status ID
+        # 1. Resolve Pending status ID
         with connections[_DB].cursor() as cur:
-            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Active' LIMIT 1")
+            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
             row = cur.fetchone()
             if row is None:
-                raise ValueError("Active status not found in inst_statuses")
+                raise ValueError("Pending status not found in inst_statuses")
             active_status_id: int = row[0]
 
         # 2. Insert site
+        # Site enters the installation phase on creation → lifecycle = Installing.
         site_sql = """
             INSERT INTO sites
                 (name, customer_group_id, ip_address, teams_channelid, teams_teamid,
                  address, city, state_code, country_code,
+                 site_status_id,
                  monitored, maintenance, receive_notifications,
                  cameras_count, total_devices, devices_down,
                  created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 1, 1, 0, 0, 0, NOW(), NOW())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    (SELECT id FROM site_statuses WHERE LOWER(status_name) = 'installing' LIMIT 1),
+                    1, 1, 1, 0, 0, 0, NOW(), NOW())
         """
         with connections[_DB].cursor() as cur:
             cur.execute(site_sql, [
@@ -542,11 +547,12 @@ def create_project_site_with_installation(data: dict) -> dict:
     _PROJECT_OWNER_DEFAULT = None
 
     with transaction.atomic(using=_DB):
+        # 1. Resolve Pending status ID
         with connections[_DB].cursor() as cur:
-            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Active' LIMIT 1")
+            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
             row = cur.fetchone()
             if row is None:
-                raise ValueError("Active status not found in inst_statuses")
+                raise ValueError("Pending status not found in inst_statuses")
             active_status_id: int = row[0]
 
         project_site_sql = """
@@ -665,6 +671,14 @@ def promote_project_site(project_site_id: int, authorized_by: int) -> int:
             if ps["verification_status"] == "verified":
                 raise ValueError(f"project_site {project_site_id} has already been promoted.")
 
+            # Entering the installation phase → site lifecycle status = Installing.
+            # Resolved by name so it survives id reordering in site_statuses.
+            cur.execute(
+                "SELECT id FROM site_statuses WHERE LOWER(status_name) = 'installing' LIMIT 1"
+            )
+            _ss = cur.fetchone()
+            installing_status_id = _ss[0] if _ss else (ps["site_status_id"] or 1)
+
             cur.execute(
                 """
                 INSERT INTO sites
@@ -698,7 +712,7 @@ def promote_project_site(project_site_id: int, authorized_by: int) -> int:
                     ps["cameras_count"] or 0,
                     ps["preowned_cameras_count"] or 0,
                     ps["exterior_cameras_count"] or 0,
-                    ps["site_status_id"] or 1,
+                    installing_status_id,
                     ps["monitored"] if ps["monitored"] is not None else 1,
                     ps["maintenance"] if ps["maintenance"] is not None else 1,
                     ps["rental"] if ps["rental"] is not None else 1,
@@ -743,15 +757,33 @@ def create_project_site_with_installation(data: dict) -> dict:
     Raises ValueError if Active inst_status is not found.
     """
     _PROJECT_OWNER_DEFAULT = None
-    _STAGING_SITE_STATUS = 5
 
     with transaction.atomic(using=_DB):
+        # 1. Resolve Pending status ID
         with connections[_DB].cursor() as cur:
-            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Active' LIMIT 1")
+            cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
             row = cur.fetchone()
             if row is None:
-                raise ValueError("Active status not found in inst_statuses")
+                raise ValueError("Pending status not found in inst_statuses")
             active_status_id: int = row[0]
+
+        # Resolve the SITE lifecycle status for the shadow site. The client sends
+        # a status NAME (defaults to "Installing" — a site sent to installation
+        # enters that phase). We resolve it against site_statuses by name; if the
+        # name is unknown we fall back to Installing, then to id 1.
+        requested_status = (data.get("status") or "Installing").strip()
+        with connections[_DB].cursor() as cur:
+            cur.execute(
+                "SELECT id FROM site_statuses WHERE LOWER(status_name) = LOWER(%s) LIMIT 1",
+                [requested_status],
+            )
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "SELECT id FROM site_statuses WHERE LOWER(status_name) = 'installing' LIMIT 1"
+                )
+                row = cur.fetchone()
+            site_status_id: int = row[0] if row else 1
 
         # 1. Insert staging review record
         with connections[_DB].cursor() as cur:
@@ -805,7 +837,7 @@ def create_project_site_with_installation(data: dict) -> dict:
                     data.get("country_code") or None,
                     data.get("lat") or None,
                     data.get("lng") or None,
-                    _STAGING_SITE_STATUS,
+                    site_status_id,
                 ],
             )
             site_id: int = cur.lastrowid
@@ -1048,6 +1080,20 @@ _EXPORT_OTHER_SQL = """
         updated_at     = NOW()
 """
 
+_EXPORT_CAMERA_UPDATE_SQL = """
+    UPDATE cameras
+    SET canvas_instance_id = %s,
+        updated_at = NOW()
+    WHERE id = %s AND installation_id = %s
+"""
+
+_EXPORT_OTHER_UPDATE_SQL = """
+    UPDATE other_devices
+    SET canvas_instance_id = %s,
+        updated_at = NOW()
+    WHERE id = %s AND installation_id = %s
+"""
+
 _EXPORT_CAMERA_VIEW_UPDATE_SQL = """
     UPDATE views v
     JOIN cameras c
@@ -1094,7 +1140,76 @@ _EXPORT_CAMERA_VIEW_INSERT_SQL = """
 """
 
 
-def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
+def _assign_canonical_numbering(
+    all_devices: list[dict],
+    installation_id: int,
+    cur,
+) -> tuple[dict[str, dict], list[str]]:
+    """
+    For camera devices in the payload, determine a collision-free CAM NN view_name
+    against the existing views already in the DB for this installation.
+    Cameras that collide with existing rows (by a different canvas_instance_id)
+    get the next free sequential number.
+
+    Returns:
+      numbering  — {instanceId: {numero: int, view_name: str}} for every camera
+      renumbered — [instanceId, ...] for cameras whose number actually changed
+    """
+    camera_devices = [d for d in all_devices if d.get("category") == "camera"]
+    if not camera_devices:
+        return {}, []
+
+    canvas_ids = [d.get("instanceId") or d.get("id") for d in camera_devices]
+    placeholders = ",".join(["%s"] * len(canvas_ids))
+    # Fetch existing View_name values that will NOT be overwritten by this export
+    cur.execute(
+        f"SELECT v.View_name FROM views v "
+        f"JOIN cameras c ON c.id = v.camera_id AND c.deleted_at IS NULL "
+        f"WHERE c.installation_id = %s "
+        f"  AND (c.canvas_instance_id IS NULL OR c.canvas_instance_id NOT IN ({placeholders})) "
+        f"  AND v.deleted_at IS NULL",
+        [installation_id, *canvas_ids],
+    )
+    taken: set[int] = set()
+    for (vn,) in cur.fetchall():
+        m = re.search(r"\d+", vn or "")
+        if m:
+            taken.add(int(m.group()))
+
+    sorted_cams = sorted(camera_devices, key=lambda d: int(d.get("numero") or 0))
+    numbering: dict[str, dict] = {}
+    renumbered: list[str] = []
+    used: set[int] = set()
+    _next = [1]
+
+    def next_free() -> int:
+        while _next[0] in taken or _next[0] in used:
+            _next[0] += 1
+        n = _next[0]
+        _next[0] += 1
+        return n
+
+    for dev in sorted_cams:
+        iid = dev.get("instanceId") or dev.get("id")
+        requested = int(dev.get("numero") or 0)
+        orig_m = re.search(r"\d+", dev.get("view_name") or "")
+        orig_n = int(orig_m.group()) if orig_m else 0
+
+        if requested > 0 and requested not in taken and requested not in used:
+            final_n = requested
+        else:
+            final_n = next_free()
+
+        used.add(final_n)
+        canonical_vn = f"CAM {final_n:02d}"
+        numbering[iid] = {"numero": final_n, "view_name": canonical_vn}
+        if orig_n != final_n:
+            renumbered.append(iid)
+
+    return numbering, renumbered
+
+
+def export_inventory_from_canvas(payload: dict, installation_id: int | None = None, site_id: int | None = None) -> dict:
     """
     Takes the full canvas snapshot and creates cameras / other_devices for the
     installation.
@@ -1104,42 +1219,20 @@ def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
 
     Returns: { success, site_id, installation_id, created_cameras, created_other_devices, skipped }
     """
-    all_devices = [*payload.get("devices", []), *payload.get("indoorDevices", [])]
-    camera_params: list[list] = []
-    camera_view_params: list[list] = []
-    other_params: list[list] = []
-    skipped: list[dict] = []
-
-    # Validación por-item en Python (sin tocar la BD) — acumula skipped.
-    for dev in all_devices:
-        instance_id = dev.get("instanceId") or dev.get("id")
-        if not instance_id:
-            skipped.append({"reason": "missing instanceId", "dev": dict(dev)})
-            continue
-
-        catalog_raw = dev.get("catalogoId")
-        if not catalog_raw:
-            skipped.append({"reason": "missing catalogoId", "instanceId": instance_id})
-            continue
-        try:
-            catalog_id = int(catalog_raw)
-        except (ValueError, TypeError):
-            skipped.append({"reason": f"catalogoId not int: {catalog_raw!r}", "instanceId": instance_id})
-            continue
-
-        category = dev.get("category", "other")
-        network_device_id = dev.get("networkDeviceId") or None
-        view_name = dev.get("view_name")
-        params = [installation_id, catalog_id, network_device_id, instance_id]
-        if category == "camera":
-            camera_params.append(params)
-            if view_name:
-                camera_view_params.append([view_name, installation_id, instance_id, installation_id])
-        else:
-            other_params.append(params)
-
     with transaction.atomic(using=_DB):
         with connections[_DB].cursor() as cur:
+            if site_id and not installation_id:
+                cur.execute(
+                    "SELECT id FROM installations WHERE site_id = %s AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+                    [site_id],
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError(f"No active installation found for site {site_id}.")
+                installation_id = row[0]
+            elif not installation_id:
+                raise ValueError("Either installation_id or site_id is required.")
+
             cur.execute(
                 "SELECT site_id FROM installations WHERE id = %s AND deleted_at IS NULL",
                 [installation_id],
@@ -1149,25 +1242,97 @@ def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
                 raise ValueError(f"Installation {installation_id} not found.")
             site_id = row[0]
 
-            # Remove orphan rows that have no canvas_instance_id (pre-fix records)
-            # so they don't accumulate alongside the properly-keyed UPSERT rows.
-            cur.execute(
-                "DELETE FROM cameras WHERE installation_id = %s AND canvas_instance_id IS NULL",
-                [installation_id],
-            )
-            cur.execute(
-                "DELETE FROM other_devices WHERE installation_id = %s AND canvas_instance_id IS NULL",
-                [installation_id],
-            )
+            design_mode = bool(payload.get("design_mode", True))
+            all_devices = [*payload.get("devices", []), *payload.get("indoorDevices", [])]
+            # Derive view_name server-side for simplified payloads that omit it
+            for dev in all_devices:
+                if not dev.get("view_name"):
+                    prefix = "cam" if dev.get("category") == "camera" else "dev"
+                    num = dev.get("numero") or 0
+                    label = dev.get("displayLabel") or dev.get("display_label")
+                    dev["view_name"] = (
+                        f"{prefix} {num}" if design_mode or not label else label
+                    )
+            numbering, renumbered = _assign_canonical_numbering(all_devices, installation_id, cur)
+            camera_params: list[list] = []
+            camera_update_params: list[list] = []
+            camera_view_params: list[list] = []
+            other_params: list[list] = []
+            other_update_params: list[list] = []
+            skipped: list[dict] = []
+
+            # Validación por-item en Python (sin tocar la BD) — acumula skipped.
+            for dev in all_devices:
+                instance_id = dev.get("instanceId") or dev.get("id")
+                if not instance_id:
+                    skipped.append({"reason": "missing instanceId", "dev": dict(dev)})
+                    continue
+
+                catalog_raw = dev.get("catalogoId")
+                inventory_id = dev.get("inventory_id")
+                
+                if not catalog_raw and not inventory_id:
+                    skipped.append({"reason": "missing catalogoId or inventory_id", "instanceId": instance_id})
+                    continue
+                
+                catalog_id = None
+                if catalog_raw is not None:
+                    try:
+                        catalog_id = int(catalog_raw)
+                    except (ValueError, TypeError):
+                        skipped.append({"reason": f"catalogoId not int: {catalog_raw!r}", "instanceId": instance_id})
+                        continue
+
+                category = dev.get("category", "other")
+                network_device_id = dev.get("networkDeviceId") or None
+                view_name = numbering.get(instance_id, {}).get("view_name") or dev.get("view_name")
+                
+                if inventory_id is not None:
+                    # UPDATE existing physical device — only claim the canvas link
+                    # (canvas_instance_id). Do NOT touch device_id here: it points
+                    # to the network host that holds the IP, and the IP pass below
+                    # manages it. The cameras table has no network_device_id column.
+                    if category == "camera":
+                        camera_update_params.append([instance_id, inventory_id, installation_id])
+                        if view_name:
+                            camera_view_params.append([view_name, installation_id, instance_id, installation_id])
+                    else:
+                        other_update_params.append([instance_id, inventory_id, installation_id])
+                else:
+                    # INSERT new generic device
+                    params = [installation_id, catalog_id, network_device_id, instance_id]
+                    if category == "camera":
+                        camera_params.append(params)
+                        if view_name:
+                            camera_view_params.append([view_name, installation_id, instance_id, installation_id])
+                    else:
+                        other_params.append(params)
+
+            # NOTE: we intentionally do NOT delete rows with canvas_instance_id IS
+            # NULL here. That cleanup used to run on every export to purge legacy
+            # "pre-fix" duplicate rows, but it cannot tell a legacy duplicate apart
+            # from a legitimate physical device that exists in Inventory and simply
+            # has no canvas link yet (e.g. created by the Inventory team, or loaded
+            # from /sites/<id>/catalog/). As a result it hard-deleted real site
+            # inventory on export, leaving the site catalog empty.
+            #
+            # New duplicates can no longer accumulate: canvas-originated devices are
+            # inserted with a non-null canvas_instance_id and de-duplicated by the
+            # unique key via ON DUPLICATE KEY UPDATE, and existing physical devices
+            # are claimed via the inventory_id UPDATE path below. Any historical
+            # NULL-canvas_instance_id duplicates must be cleaned by a one-time
+            # migration, never by a blanket per-export DELETE.
 
             logger.warning(
-                "[export] installation=%s site=%s cameras=%s others=%s skipped=%s",
-                installation_id, site_id, len(camera_params), len(other_params), len(skipped),
+                "[export] installation=%s site=%s cameras(ins=%s upd=%s) others(ins=%s upd=%s) skipped=%s",
+                installation_id, site_id, len(camera_params), len(camera_update_params), len(other_params), len(other_update_params), len(skipped),
             )
 
             try:
                 if camera_params:
                     cur.executemany(_EXPORT_CAMERA_SQL, camera_params)
+                if camera_update_params:
+                    cur.executemany(_EXPORT_CAMERA_UPDATE_SQL, camera_update_params)
                 if camera_view_params:
                     cur.executemany(_EXPORT_CAMERA_VIEW_UPDATE_SQL, camera_view_params)
                     cur.executemany(
@@ -1176,10 +1341,58 @@ def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
                     )
                 if other_params:
                     cur.executemany(_EXPORT_OTHER_SQL, other_params)
+                if other_update_params:
+                    cur.executemany(_EXPORT_OTHER_UPDATE_SQL, other_update_params)
             except Exception as exc:
                 # El atomic hace rollback automático al propagar — sin estado parcial.
                 logger.exception("[export] batch INSERT falló (installation=%s)", installation_id)
                 raise ValueError(f"No se pudieron exportar los dispositivos: {exc}") from exc
+
+            # ── Persist device IPs ─────────────────────────────────────────
+            # A camera/other_device's IP lives on its linked network-host row
+            # (devices.address), reached via {cameras|other_devices}.device_id —
+            # the cameras/other_devices tables have no IP column of their own.
+            # The canvas only carries the IP, so here we upsert that host row:
+            # update the linked device's address, or create one (code='Other',
+            # a valid value of the devices.code enum) and link it when the
+            # device has no host yet. Without this the IP entered on the map
+            # never reaches Inventory (the catalog reads devices.address).
+            for dev in all_devices:
+                ip = (dev.get("ip") or "").strip()
+                if not ip:
+                    continue
+                instance_id = dev.get("instanceId") or dev.get("id")
+                if not instance_id:
+                    continue
+                table = "cameras" if dev.get("category") == "camera" else "other_devices"
+                cur.execute(
+                    f"SELECT id, device_id FROM {table} "
+                    f"WHERE installation_id = %s AND canvas_instance_id = %s AND deleted_at IS NULL "
+                    f"ORDER BY id DESC LIMIT 1",
+                    [installation_id, instance_id],
+                )
+                row = cur.fetchone()
+                if row is None:
+                    continue
+                row_id, device_id = row
+                if device_id:
+                    cur.execute(
+                        "UPDATE devices SET address = %s, updated_at = NOW() WHERE id = %s",
+                        [ip, device_id],
+                    )
+                else:
+                    host_name = (dev.get("view_name") or dev.get("name")
+                                 or f"{table[:-1]}-{instance_id}")
+                    cur.execute(
+                        "INSERT INTO devices (name, code, address, site_id, created_at, updated_at) "
+                        "VALUES (%s, 'Other', %s, %s, NOW(), NOW())",
+                        [str(host_name)[:255], ip, site_id],
+                    )
+                    new_device_id = cur.lastrowid
+                    cur.execute(
+                        f"UPDATE {table} SET device_id = %s, updated_at = NOW() WHERE id = %s",
+                        [new_device_id, row_id],
+                    )
 
     # Fetch created devices and emit SSE events for real-time sync
     created_device_ids = []
@@ -1213,19 +1426,66 @@ def export_inventory_from_canvas(installation_id: int, payload: dict) -> dict:
         "created_cameras": len(camera_params),
         "created_other_devices": len(other_params),
         "skipped": skipped,
+        "numbering": numbering,
+        "renumbered": renumbered,
     }
+
+
+def _serial_in_use(serial: str, exclude_prefix: str, exclude_pk: int) -> bool:
+    """
+    True if `serial` is already assigned to another *active* device
+    (cameras or other_devices), excluding the device being updated.
+
+    sigtools_beta is a shared legacy DB with soft-deletes, so uniqueness is
+    enforced in the app (→ 409) rather than with a hard UNIQUE constraint that
+    could clash with historical / soft-deleted rows. All values parameterized.
+    """
+    with connections[_DB].cursor() as cur:
+        if exclude_prefix == "cam":
+            cur.execute(
+                "SELECT 1 FROM cameras WHERE serial = %s AND deleted_at IS NULL AND id <> %s LIMIT 1",
+                [serial, exclude_pk],
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM cameras WHERE serial = %s AND deleted_at IS NULL LIMIT 1",
+                [serial],
+            )
+        if cur.fetchone():
+            return True
+
+        if exclude_prefix != "cam":
+            cur.execute(
+                "SELECT 1 FROM other_devices WHERE serial = %s AND deleted_at IS NULL AND id <> %s LIMIT 1",
+                [serial, exclude_pk],
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM other_devices WHERE serial = %s AND deleted_at IS NULL LIMIT 1",
+                [serial],
+            )
+        return cur.fetchone() is not None
 
 
 def update_device_serial(site_id: int, device_id: str, serial: str) -> None:
     """
     Update serial on a catalog device identified by the string device_id
-    (e.g. 'cam-12', 'switch-5').  Raises ValueError if not found.
+    (e.g. 'cam-12', 'switch-5').
+
+    Raises:
+        ValueError    — device_id malformed or device not found for the site.
+        ConflictError — serial already assigned to another active device (409).
     """
     prefix, _, raw_id = device_id.partition("-")
     try:
         pk = int(raw_id)
     except ValueError:
         raise ValueError(f"Invalid device_id format: {device_id!r}")
+
+    # Serial uniqueness (app-level → 409). Skip the check for empty serials
+    # (clearing a serial is allowed and many devices legitimately have none).
+    if serial and serial.strip() and _serial_in_use(serial, prefix, pk):
+        raise ConflictError(f"Serial '{serial}' is already assigned to another device.")
 
     with connections[_DB].cursor() as cur:
         if prefix == "cam":
@@ -1252,6 +1512,118 @@ def update_device_serial(site_id: int, device_id: str, serial: str) -> None:
             raise ValueError(f"Device {device_id!r} not found for site {site_id}")
 
     _publish_device_event("site_device_updated", site_id, device_id, serial=serial)
+
+
+# Columns on sigtools_beta.sites the API is allowed to edit. Used as an
+# allowlist so column names are never taken from user input (values stay
+# parameterized).
+_SITE_EDITABLE_COLUMNS = (
+    "name", "ip_address", "city", "state_code", "country_code",
+    "address", "timezone", "monitored", "maintenance",
+    "receive_notifications", "installation_date",
+)
+
+
+def update_site(site_id: int, data: dict) -> dict | None:
+    """
+    Update editable core fields on a sigtools_beta.sites row (raw SQL — the
+    Site model is unmanaged/read-only). Only fields present in `data` and
+    whitelisted in _SITE_EDITABLE_COLUMNS are written.
+
+    Returns the updated site dict (SiteDetailSerializer shape), or None when
+    the site does not exist / is soft-deleted.
+    """
+    from apps.installations import selectors
+
+    # Existence check up front: MySQL UPDATE rowcount reflects *changed* rows,
+    # so a no-op update (identical values) returns 0 even though the row exists.
+    if selectors.get_site_or_404(site_id) is None:
+        return None
+
+    updates = {col: data[col] for col in _SITE_EDITABLE_COLUMNS if col in data}
+
+    # Site lifecycle status: the client sends a status NAME (e.g. "Installing",
+    # "Live Testing") under `status`/`site_status`. Resolve it to the FK id in
+    # site_statuses and write sites.site_status_id. We never invent rows — an
+    # unknown name is rejected so the column only ever holds valid statuses.
+    status_name = data.get("site_status") or data.get("status")
+    if status_name:
+        with connections[_DB].cursor() as cur:
+            cur.execute(
+                "SELECT id FROM site_statuses WHERE LOWER(status_name) = LOWER(%s) LIMIT 1",
+                [status_name.strip()],
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"Unknown site status: {status_name!r}")
+        updates["site_status_id"] = row[0]
+
+    if updates:
+        set_clause = ", ".join(f"{col} = %s" for col in updates)
+        params = list(updates.values()) + [site_id]
+        with connections[_DB].cursor() as cur:
+            cur.execute(
+                f"UPDATE sites SET {set_clause}, updated_at = NOW() "
+                "WHERE id = %s AND deleted_at IS NULL",
+                params,
+            )
+        cu.invalidate_dashboard()
+        _rt_publish(CH_INSTALLATIONS, "site_updated", {"site_id": site_id, **updates})
+
+    return selectors.get_site_detail(site_id)
+
+
+def validate_topology(devices, connections) -> dict:
+    """
+    Validate a canvas network topology: loop detection + PoE budget + uplink
+    bandwidth + port counts. Pure computation (no DB) — see
+    apps.installations.topology for the algorithm and request contract.
+    """
+    from apps.installations import topology
+
+    return topology.validate(list(devices), list(connections))
+
+
+def analyze_topology(devices, connections, check: dict | None = None) -> dict:
+    """
+    Full topology analysis: validate + build_tree + cascade + optional connection check.
+    check = {source: str, target: str} to validate a proposed new connection.
+    """
+    from apps.installations import topology
+
+    return topology.analyze(list(devices), list(connections), check)
+
+
+def create_indoor_map(site_id: int, image_file, label: str = "", uploaded_by: int | None = None):
+    """
+    Store an uploaded indoor floor-plan on MEDIA_ROOT and return the created
+    SiteIndoorMap row. The FileField writes the file natively (no base64).
+    """
+    from apps.installations.models import SiteIndoorMap
+
+    return SiteIndoorMap.objects.create(
+        site_id=site_id,
+        label=label or "",
+        image=image_file,
+        content_type=getattr(image_file, "content_type", "") or "",
+        size_bytes=getattr(image_file, "size", 0) or 0,
+        uploaded_by=uploaded_by,
+    )
+
+
+def delete_indoor_map(site_id: int, map_id: int) -> bool:
+    """Delete an indoor map (row + file on disk). False if not found."""
+    from apps.installations.models import SiteIndoorMap
+
+    obj = SiteIndoorMap.objects.filter(site_id=site_id, pk=map_id).first()
+    if obj is None:
+        return False
+    try:
+        obj.image.delete(save=False)  # remove the file from MEDIA_ROOT
+    except Exception as exc:
+        logger.warning("[indoor-map] file delete failed for %s: %s", map_id, exc)
+    obj.delete()
+    return True
 
 
 def delete_site(site_id: int) -> bool:
@@ -1645,6 +2017,20 @@ def update_sig_project(
     p.data = data
     p.version = p.version + 1
     p.save()
+
+    # Protect the canvas layout: mirror it into the `design` column, but ONLY when
+    # the incoming payload actually carries a design (devices/drawings/floorPlans).
+    # A blanking save (empty layout — e.g. a failed load followed by an auto-save)
+    # therefore leaves the last good `design` snapshot untouched, so the layout is
+    # never lost and get_sig_project() can recover it. Raw SQL because `design`
+    # lives only in the DB (kept out of the model to avoid migration drift).
+    if data.get("devices") or data.get("drawings") or data.get("floorPlans"):
+        with connections["default"].cursor() as cur:
+            cur.execute(
+                "UPDATE sig_projects SET design = %s WHERE id = %s",
+                [json.dumps(data), str(project_id)],
+            )
+
     result = _project_to_dict(p)
     transaction.on_commit(lambda: _publish_project(result))
     return result, None
@@ -2163,3 +2549,260 @@ def mark_all_notifications_read(*, recipient_id: int) -> int:
     from apps.installations.models import Notification
 
     return Notification.objects.filter(recipient_id=recipient_id, is_read=False).update(is_read=True)
+
+
+# ---------------------------------------------------------------------------
+# Geocoding
+# ---------------------------------------------------------------------------
+
+_NOMINATIM_UA = "SIGInstallations/1.0 (juan.riascos@sig.systems)"
+_NOMINATIM_BASE = "https://nominatim.openstreetmap.org"
+
+
+def geocode_site(site_id: int) -> dict | None:
+    """
+    Returns {lat, lng, source} for a site or None if not resolvable.
+    Cascade:
+      1. DB lat/lon already stored
+      2. Nominatim structured query (street+city+state+country — most precise)
+      3. Nominatim free-form full address
+      4. Nominatim free-form address only
+      5. Nominatim city+state fallback
+      6. US Census Geocoder (only when country=us/blank and Nominatim failed)
+    Saves resolved coordinates back to project_sites. Cache key v2 so stale
+    None results from the old logic are retried with the improved cascade.
+    """
+    import re as _re
+    import httpx
+    from apps.installations.models import ProjectSite
+
+    cache_key = f"inst:geocode:site:v4:{site_id}"
+
+    def _strip_unit(addr: str) -> str:
+        """Remove apartment/suite/unit suffixes that confuse Nominatim."""
+        return _re.sub(
+            r",?\s*(suite|ste\.?|unit|apt\.?|#)\s*[\w-]+\s*$",
+            "",
+            addr,
+            flags=_re.IGNORECASE,
+        ).strip().rstrip(",").strip()
+
+    def _extract_street(addr: str, city: str) -> str:
+        """
+        When address already contains city/state/ZIP (e.g. '4429 US-1, Fort Pierce, FL 34982'),
+        extract only the street number+name for use in structured Nominatim queries.
+        Looks for ', CITY' pattern (after a comma) to avoid matching city names that are
+        part of the street name itself (e.g. '3281 Manor Way, Dallas, TX').
+        """
+        if not addr:
+            return addr
+        # Match ', CITY' after a comma separator (city appears as a distinct segment)
+        if city:
+            m_city = _re.search(r",\s*" + _re.escape(city) + r"\b", addr, flags=_re.IGNORECASE)
+            if m_city:
+                return addr[:m_city.start()].strip()
+        # Fallback: truncate at ', STATE ZIP' or ', STATE, ZIP' pattern
+        m = _re.search(r",\s*[A-Za-z]{2}\s+\d{5}(?:-\d{4})?\s*$", addr)
+        if m:
+            return addr[:m.start()].strip(", ").strip()
+        # Fallback: truncate at standalone trailing ZIP
+        m = _re.search(r",\s*\d{5}(?:-\d{4})?\s*$", addr)
+        if m:
+            trimmed = addr[:m.start()]
+            m2 = _re.search(r",\s*[A-Za-z]{2}\s*$", trimmed)
+            if m2:
+                trimmed = trimmed[:m2.start()]
+            return trimmed.strip(", ").strip()
+        return addr
+
+    def _nominatim_structured(address: str, city: str, state: str, country: str) -> tuple[float, float] | None:
+        params = {
+            "format": "json", "limit": 1,
+            "street": address,
+            "city": city,
+            "state": state,
+            "country": country or "us",
+        }
+        # Remove empty fields — Nominatim handles partial structured better than empty strings
+        params = {k: v for k, v in params.items() if v}
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/search",
+                params=params,
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=6.0,
+            )
+            data = resp.json()
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+        except Exception as exc:
+            logger.warning("[geocode] nominatim structured failed site=%s params=%s err=%s", site_id, params, exc)
+        return None
+
+    def _nominatim_free(query: str, country: str) -> tuple[float, float] | None:
+        if not query:
+            return None
+        params: dict = {"format": "json", "limit": 1, "q": query}
+        if country:
+            params["countrycodes"] = country
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/search",
+                params=params,
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=6.0,
+            )
+            data = resp.json()
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+        except Exception as exc:
+            logger.warning("[geocode] nominatim free failed site=%s q=%r err=%s", site_id, query, exc)
+        return None
+
+    def _census_geocode(address: str, city: str, state: str) -> tuple[float, float] | None:
+        """US Census Bureau geocoder — free, no key, high precision for US street addresses."""
+        query_str = ", ".join(filter(None, [address, city, state]))
+        if not query_str:
+            return None
+        try:
+            resp = httpx.get(
+                "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress",
+                params={
+                    "address": query_str,
+                    "benchmark": "Public_AR_Current",
+                    "format": "json",
+                },
+                timeout=8.0,
+            )
+            matches = resp.json().get("result", {}).get("addressMatches", [])
+            if matches:
+                coords = matches[0]["coordinates"]
+                return float(coords["y"]), float(coords["x"])  # y=lat, x=lng
+        except Exception as exc:
+            logger.warning("[geocode] census geocoder failed site=%s q=%r err=%s", site_id, query_str, exc)
+        return None
+
+    def _compute():
+        from apps.sigtools.models import Site as _SigtoolsSite
+
+        # Check ProjectSite (linked via site_id FK) for already-stored coordinates.
+        ps_row = (
+            ProjectSite.objects.using(_DB)
+            .filter(site_id=site_id, deleted_at__isnull=True)
+            .values("id", "lat", "lon")
+            .first()
+        )
+        if ps_row and ps_row["lat"] and ps_row["lon"]:
+            return {"lat": float(ps_row["lat"]), "lng": float(ps_row["lon"]), "source": "db"}
+
+        # Read address/city/state from the operational sites table.
+        row = (
+            _SigtoolsSite.objects.using(_DB)
+            .filter(pk=site_id, deleted_at__isnull=True)
+            .values("address", "city", "state_code", "country_code")
+            .first()
+        )
+        if row is None:
+            return None
+
+        raw_address = (row.get("address") or "").strip()
+        address = _strip_unit(raw_address)
+        city    = (row.get("city") or "").strip()
+        state   = (row.get("state_code") or "").strip()
+        country = (row.get("country_code") or "us").strip().lower()
+
+        # Detect if the address field already contains a full address (city/ZIP embedded).
+        # When true, extract just the street portion for the structured query, and use
+        # the address as-is for free-form queries (no need to append city/state again).
+        is_full_address = bool(
+            (city and city.lower() in address.lower())
+            or _re.search(r"\b\d{5}\b", address)
+        )
+        street_only = _extract_street(address, city) if is_full_address else address
+
+        result: tuple[float, float] | None = None
+        source = "nominatim"
+
+        # 1. Nominatim structured with clean street portion (most precise)
+        if street_only and city:
+            result = _nominatim_structured(street_only, city, state, country)
+
+        # 2. Nominatim free-form — use address as-is if it's already a full address,
+        #    otherwise assemble from fields.
+        if not result:
+            if is_full_address:
+                full_q = address
+            else:
+                full_q = ", ".join(filter(None, [address, city, state, "USA" if country == "us" else country.upper()]))
+            result = _nominatim_free(full_q, country)
+
+        # 3. Nominatim free-form address only (handles edge cases where full_q failed)
+        if not result and is_full_address and address != full_q:
+            result = _nominatim_free(address, country)
+        elif not result and not is_full_address and address:
+            result = _nominatim_free(address, country)
+
+        # 4. Nominatim city+state fallback
+        if not result:
+            city_state = ", ".join(filter(None, [city, state]))
+            result = _nominatim_free(city_state, country)
+
+        # 5. US Census Geocoder (US sites only, when all Nominatim attempts failed)
+        if not result and country in ("us", "usa", ""):
+            result = _census_geocode(address, city, state)
+            if result:
+                source = "census"
+
+        if result:
+            lat, lng = result
+            if ps_row:
+                ProjectSite.objects.using(_DB).filter(site_id=site_id).update(lat=lat, lon=lng)
+            return {"lat": lat, "lng": lng, "source": source}
+
+        logger.warning(
+            "[geocode] site %s not resolved — address=%r city=%r state=%r country=%r",
+            site_id, raw_address, city, state, country,
+        )
+        return None
+
+    return cu.cached(cache_key, _compute, 86400)
+
+
+def geocode_search(query: str, limit: int = 5) -> list[dict]:
+    """
+    Nominatim search proxy with Redis caching (TTL 1 h).
+    Returns list of {lat, lon, display_name} matching the raw Nominatim shape.
+    """
+    import hashlib
+    import httpx
+
+    key_hash = hashlib.md5(f"{query.lower()}:{limit}".encode()).hexdigest()
+    cache_key = f"inst:geocode:search:{key_hash}"
+
+    def _compute():
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/search",
+                params={
+                    "format": "json",
+                    "limit": limit,
+                    "q": query,
+                    "countrycodes": "co,mx,pe,cl,ar,ec,ve,pa,us,es",
+                    "addressdetails": 0,
+                },
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=5.0,
+            )
+            data = resp.json()
+            return [
+                {
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "display_name": r.get("display_name", ""),
+                }
+                for r in (data or [])
+            ]
+        except Exception:
+            return []
+
+    return cu.cached(cache_key, _compute, 3600)

@@ -5,6 +5,7 @@ Complex joins use raw SQL; simple lookups use the ORM.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 from django.db import connections
 
 from apps.core import cache_utils as cu
+from apps.installations.catalog_enrichment import enrich_catalog_item, enrich_camera_item, enrich_network_item
 from apps.sigtools.models import (
     CameraModel,
     CustomerGroup,
@@ -87,12 +89,23 @@ def _compute_camera_catalog() -> list[dict]:
 
 def get_device_types() -> list[dict]:
     def _compute():
-        return list(
+        rows = list(
             DeviceType.objects.using(_DB)
             .order_by("device_type", "brand", "model")
             .values("id", "device_type", "brand", "model")
         )
-    return cu.cached("inst:catalog:device_types", _compute, cu.TTL_CATALOG)
+        return [
+            enrich_network_item({
+                "id": f"dev-{row['id']}",
+                "name": row.get("model") or row.get("device_type") or "",
+                "brand": row.get("brand") or "",
+                "subtype": (row.get("device_type") or "").lower(),
+                "category": "static",
+                "isExistingInventory": False,
+            })
+            for row in rows
+        ]
+    return cu.cached("inst:catalog:device_types:v2", _compute, cu.TTL_CATALOG)
 
 
 def get_vms_catalog() -> list[str]:
@@ -358,6 +371,7 @@ def _compute_sites_dashboard() -> list[dict]:
             s.state_code,
             s.customer_group_id,
             ist.name            AS status,
+            ss.status_name      AS site_status,
             u.name              AS responsable,
             it_u.name           AS it_manager,
             i.id                AS installation_id,
@@ -366,6 +380,7 @@ def _compute_sites_dashboard() -> list[dict]:
             i.starting_date,
             i.limit_date
         FROM sites s
+        LEFT JOIN site_statuses ss  ON ss.id            = s.site_status_id
         LEFT JOIN (
             SELECT site_id, MAX(id) AS latest_id
             FROM installations
@@ -452,10 +467,24 @@ def _compute_sites_dashboard() -> list[dict]:
         )
         location = ", ".join(filter(None, [row.get("city"), row.get("state_code")])) or None
         latest_note = note_entries[-1]["action"] if note_entries else None
+        site_status_str = row.get("site_status") or ""
+        if site_status_str:
+            is_operational = site_status_str.lower() in ("live", "live testing")
+        else:
+            # Fallback heuristic when site_status_id is not set
+            s = (row["status"] or "").lower()
+            is_operational = any(kw in s for kw in ("finalizad", "complet", "done", "finish", "closed", "activ", "live"))
+
+        logs_categorized = {
+            "installation": [e for e in log_entries if "install" in (e.get("action") or "").lower()],
+            "inventory":    [e for e in log_entries if "install" not in (e.get("action") or "").lower()],
+        }
         result.append({
             "id": row["id"],
             "name": row["name"],
             "status": row["status"] or None,
+            "site_status": row.get("site_status") or None,
+            "is_operational": is_operational,
             "address": row["address"] or None,
             "location": location,
             "responsable": row["responsable"] or None,
@@ -463,6 +492,7 @@ def _compute_sites_dashboard() -> list[dict]:
             "notes": latest_note,
             "log": log_entries,
             "log_count": len(log_entries),
+            "logs_categorized": logs_categorized,
             "customer_group_id": row["customer_group_id"],
             "total_cameras": row.get("total_cameras"),
             "total_views": row.get("total_views"),
@@ -556,6 +586,76 @@ def get_site_or_404(site_id: int) -> Site | None:
     return Site.objects.using(_DB).filter(pk=site_id, deleted_at__isnull=True).first()
 
 
+def get_site_detail(site_id: int) -> dict | None:
+    """
+    Editable core fields for a single site (sigtools_beta.sites).
+    Returns None when the site does not exist or is soft-deleted.
+    Shape matches SiteDetailSerializer.
+    """
+    site = get_site_or_404(site_id)
+    if site is None:
+        return None
+    # Site lifecycle status (site_statuses: Created/Installing/Live Testing/Live/
+    # Staging) via sites.site_status_id. Exposed as `status` so the Project Info
+    # editor can read and write it. This is the SITE lifecycle, distinct from the
+    # installation work status (inst_statuses) shown elsewhere.
+    site_status_id = None
+    site_status = None
+    with connections[_DB].cursor() as cur:
+        cur.execute(
+            "SELECT s.site_status_id, ss.status_name "
+            "FROM sites s LEFT JOIN site_statuses ss ON ss.id = s.site_status_id "
+            "WHERE s.id = %s",
+            [site_id],
+        )
+        row = cur.fetchone()
+        if row:
+            site_status_id, site_status = row[0], row[1]
+
+    # Personnel from the latest installation of this site. The Project Info editor
+    # reads project_owner / it_lead_tech_id from the site detail; they actually
+    # live on the installation, so surface them here (with resolved names).
+    project_owner = it_lead_tech_id = None
+    project_owner_name = it_lead_tech_name = None
+    with connections[_DB].cursor() as cur:
+        cur.execute(
+            """
+            SELECT i.project_owner, uo.name, i.it_lead_tech_id, ut.name
+            FROM installations i
+            LEFT JOIN users uo ON uo.id = i.project_owner
+            LEFT JOIN users ut ON ut.id = i.it_lead_tech_id
+            WHERE i.site_id = %s AND i.deleted_at IS NULL
+            ORDER BY i.id DESC LIMIT 1
+            """,
+            [site_id],
+        )
+        row = cur.fetchone()
+        if row:
+            project_owner, project_owner_name, it_lead_tech_id, it_lead_tech_name = row
+    return {
+        "id":                    site.id,
+        "name":                  site.name,
+        "ip_address":            site.ip_address,
+        "city":                  site.city,
+        "state_code":            site.state_code,
+        "country_code":          site.country_code,
+        "address":               site.address,
+        "timezone":              site.timezone,
+        "monitored":             site.monitored,
+        "maintenance":           site.maintenance,
+        "receive_notifications": site.receive_notifications,
+        "installation_date":     site.installation_date,
+        "updated_at":            site.updated_at,
+        "status":                site_status,
+        "site_status":           site_status,
+        "site_status_id":        site_status_id,
+        "project_owner":         project_owner,
+        "project_owner_name":    project_owner_name,
+        "it_lead_tech_id":       it_lead_tech_id,
+        "it_lead_tech_name":     it_lead_tech_name,
+    }
+
+
 def get_camera_model_catalog() -> list[dict]:
     """
     Flat list of every camera model registered in the company catalog.
@@ -566,7 +666,7 @@ def get_camera_model_catalog() -> list[dict]:
     reuse the same TypeScript interface. serial and ip are always None
     because these are model definitions, not physical units.
     """
-    return cu.cached("inst:catalog:camera_model_catalog", _compute_camera_model_catalog, cu.TTL_CATALOG)
+    return cu.cached("inst:catalog:camera_model_catalog:v2", _compute_camera_model_catalog, cu.TTL_CATALOG)
 
 
 def _compute_camera_model_catalog() -> list[dict]:
@@ -588,22 +688,18 @@ def _compute_camera_model_catalog() -> list[dict]:
         rows = [dict(zip(cols, row)) for row in cur.fetchall()]
 
     return [
-        {
+        enrich_camera_item({
             "id": f"cam-{row['model_id']}",
             "name": row["name"],
-            "brand": (row["brand"] or "").upper(),
+            "brand": row["brand"] or "",
             "serial": None,
             "ip": None,
             "resolution": None,
             "type": row["type_desc"],
             "category": "camera",
             "subtype": (row["subtype"] or "").lower(),
-            "lensType": None,
-            "rango_lente_mm": None,
-            "rango_fov_grados": None,
-            "poe_watts": None,
-            "bandwidth_mbps": None,
-        }
+            "isExistingInventory": False,
+        })
         for row in rows
     ]
 
@@ -719,23 +815,172 @@ _OTHER_DEVICE_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 
+def get_site_bom(site_id: int) -> dict:
+    """
+    Bill of Materials for a site — device counts grouped by catalog entry,
+    computed with SQL GROUP BY (cameras + other_devices). Returns the
+    aggregated rows so the frontend never iterates per-unit records in memory
+    to build the hardware table.
+    """
+    items: list[dict] = []
+    total_cameras = 0
+    total_other = 0
+
+    with connections[_DB].cursor() as cur:
+        # Cameras grouped by model / brand / type
+        cur.execute(
+            """
+            SELECT cm.name AS name, cb.Name AS brand, ct.name AS subtype, COUNT(*) AS qty
+            FROM cameras c
+            JOIN camera_models cm ON c.camera_model_id = cm.id
+            JOIN camera_brands  cb ON cm.camera_brand_id = cb.id
+            JOIN camera_types   ct ON cm.camera_type_id  = ct.id
+            JOIN installations  i  ON c.installation_id   = i.id
+            WHERE i.site_id = %s AND i.deleted_at IS NULL AND c.deleted_at IS NULL
+            GROUP BY cm.name, cb.Name, ct.name
+            ORDER BY qty DESC, ct.name, cb.Name, cm.name
+            """,
+            [int(site_id)],
+        )
+        for name, brand, subtype, qty in cur.fetchall():
+            total_cameras += qty
+            items.append({
+                "category": "camera",
+                "subtype": (subtype or "").lower(),
+                "brand": (brand or "").upper(),
+                "name": name,
+                "qty": qty,
+                "is_camera": True,
+            })
+
+        # Other devices grouped by device_type / brand / model
+        cur.execute(
+            """
+            SELECT dt.model AS name, dt.brand AS brand, dt.device_type AS device_type, COUNT(*) AS qty
+            FROM other_devices od
+            JOIN device_types dt ON od.device_type_id = dt.id
+            JOIN installations i  ON od.installation_id = i.id
+            WHERE i.site_id = %s AND i.deleted_at IS NULL AND od.deleted_at IS NULL
+            GROUP BY dt.model, dt.brand, dt.device_type
+            ORDER BY qty DESC, dt.device_type, dt.brand, dt.model
+            """,
+            [int(site_id)],
+        )
+        for name, brand, device_type, qty in cur.fetchall():
+            mapping = _OTHER_DEVICE_MAP.get(device_type)
+            category = mapping[0] if mapping else "device"
+            subtype = mapping[1] if mapping else (device_type or "unknown").lower().replace(" ", "_")
+            total_other += qty
+            items.append({
+                "category": category,
+                "subtype": subtype,
+                "brand": (brand or "").upper(),
+                "name": name,
+                "qty": qty,
+                "is_camera": False,
+            })
+
+    return {
+        "site_id": site_id,
+        "total_cameras": total_cameras,
+        "total_other_devices": total_other,
+        "total_devices": total_cameras + total_other,
+        "items": items,
+    }
+
+
+def get_bom_preview(devices: list[dict]) -> dict:
+    """
+    Pure BOM aggregation — port of helpers/report.ts generateBOMReport +
+    OnboardingModal.tsx computeCamerasAndViews.
+    Input devices: [{instanceId, numero, area, category, subtype, lensType, ...}]
+    Returns:
+      coverage_by_area: [{area, rows: [{area, device_type, numero, instance_id}]}]
+      summary:          [{device_type, qty, is_camera}]  (cameras first, then alpha)
+      total_cameras, total_views, total_devices
+    """
+    from apps.installations.catalog_enrichment import build_device_type_label, compute_cameras_and_views
+
+    sorted_devices = sorted(devices, key=lambda d: d.get("numero") or 0)
+
+    coverage_map: dict[str, list[dict]] = {}
+    type_count: dict[str, dict] = {}
+
+    for dev in sorted_devices:
+        area = (dev.get("area") or "Unassigned").strip() or "Unassigned"
+        device_type = build_device_type_label(dev)
+        is_camera = (dev.get("category") or "").lower() == "camera"
+
+        coverage_map.setdefault(area, []).append({
+            "area": area,
+            "device_type": device_type,
+            "numero": dev.get("numero"),
+            "instance_id": dev.get("instanceId"),
+        })
+
+        if device_type not in type_count:
+            type_count[device_type] = {"qty": 0, "is_camera": is_camera}
+        type_count[device_type]["qty"] += 1
+
+    # Sort areas: alphabetical, "Unassigned" last
+    sorted_areas = sorted(
+        coverage_map.items(),
+        key=lambda kv: ("\xff" if kv[0] == "Unassigned" else kv[0].lower()),
+    )
+
+    summary = sorted(
+        [{"device_type": k, "qty": v["qty"], "is_camera": v["is_camera"]} for k, v in type_count.items()],
+        key=lambda r: (0 if r["is_camera"] else 1, r["device_type"]),
+    )
+
+    cv = compute_cameras_and_views(devices)
+
+    return {
+        "coverage_by_area": [{"area": area, "rows": rows} for area, rows in sorted_areas],
+        "summary": summary,
+        "total_cameras": cv["cameras"],
+        "total_views": cv["views"],
+        "total_devices": len(devices),
+    }
+
+
 def get_site_device_catalog(site_id: int) -> list[dict]:
     """
     Unified device catalog for a site.
 
     Returns all cameras (one entry per physical unit) and all other devices
     (one entry per physical unit from other_devices) in a single flat list
-    with a consistent shape.  All fields that don't apply to a given device
-    type are returned as None so the frontend interface stays stable.
-
-    Serial numbers are enriched from inv_articles notes ([device:XXX] tags) so
-    the frontend never needs to download the full article list for this purpose.
+    with a consistent shape, fully enriched (lens specs, PoE, dispatch overlay).
 
     Order: cameras first (sorted by subtype/brand/name), then other devices
     sorted by device_type/brand/model.
     """
     catalog = _get_site_cameras_for_catalog(site_id) + _get_site_other_devices_for_catalog(site_id)
-    return _enrich_catalog_serials(catalog)
+    catalog = _enrich_catalog_serials(catalog)
+
+    # Merge dispatch overlay (physical status, qty_received, installed, etc.)
+    dispatch_map = {d.device_id: d for d in get_site_dispatch_all(site_id)}
+    for item in catalog:
+        d = dispatch_map.get(item["id"])
+        item["vendor"]            = d.vendor if d else None
+        item["quantity_send"]     = d.qty_sent if d else None
+        item["tracking"]          = d.tracking if d else None
+        item["observations"]      = d.observations if d else None
+        item["dispatched_at"]     = d.dispatched_at.isoformat() if d and d.dispatched_at else None
+        item["qty_received"]      = d.qty_received if d else None
+        item["received_at"]       = d.received_at.isoformat() if d and d.received_at else None
+        item["receipt_photo_url"] = d.receipt_photo_url if d else None
+        item["installed"]         = d.installed if d else False
+        item["installed_at"]      = d.installed_at.isoformat() if d and d.installed_at else None
+        item["install_photo_url"] = d.install_photo_url if d else None
+        item["physical_status"]   = (
+            "installed" if (d and d.installed)
+            else "received" if (d and d.received_at)
+            else "none"
+        )
+
+    # Apply enricher: populates lensType/ranges/poe_watts from subtype defaults
+    return [enrich_catalog_item(item) for item in catalog]
 
 
 def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
@@ -1080,6 +1325,31 @@ def get_sig_project(project_id: str) -> dict | None:
         p = SigProject.objects.get(pk=project_id)
     except SigProject.DoesNotExist:
         return None
+
+    data = p.data or {}
+    # Self-heal: if the live layout is empty (e.g. a previous blanking save) but the
+    # protected `design` snapshot still holds a layout, restore the design fields
+    # from it. Only the design itself is recovered — current metadata (sitios,
+    # type, linked_installation_id) is left as-is. The next save persists the
+    # recovered layout back into `data`, so the project heals on open.
+    if not (data.get("devices") or data.get("drawings") or data.get("floorPlans")):
+        try:
+            with connections["default"].cursor() as cur:
+                cur.execute("SELECT design FROM sig_projects WHERE id = %s", [str(project_id)])
+                row = cur.fetchone()
+            if row and row[0]:
+                saved = json.loads(row[0])
+                if isinstance(saved, dict) and (
+                    saved.get("devices") or saved.get("drawings") or saved.get("floorPlans")
+                ):
+                    for key in ("devices", "drawings", "floorPlans", "enlaces"):
+                        if saved.get(key):
+                            data[key] = saved[key]
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "design recovery failed for project %s", project_id, exc_info=True
+            )
+
     return {
         "id": str(p.id),
         "name": p.name,
@@ -1090,7 +1360,7 @@ def get_sig_project(project_id: str) -> dict | None:
         "approval_status": p.approval_status,
         "approval_requested_by": p.approval_requested_by,
         "approval_requested_by_name": _sigtools_user_name_by_id(p.approval_requested_by),
-        "data": p.data,
+        "data": data,
     }
 
 
@@ -1504,6 +1774,201 @@ def _compute_all_sites_dispatch_progress(site_ids: list[int] | None = None) -> l
         })
     result.sort(key=lambda x: x["site_id"])
     return result
+
+
+# ---------------------------------------------------------------------------
+# CEO dashboard (company-wide project health analytics)
+# ---------------------------------------------------------------------------
+
+# Keywords that flag a project as delayed when found in logs/notes.
+# MySQL REGEXP with the default (ci) collation matches case-insensitively.
+_DELAY_REGEX = r"retraso|atrasad|demora|delay|behind|problema grave"
+
+
+def get_ceo_dashboard() -> dict:
+    """
+    Company-wide project health for the CEO dashboard.
+
+    Per project (latest installation per active site) returns pre-computed
+    metrics — install progress, schedule usage and a health semaphore — plus an
+    overall summary, so the frontend never downloads every site to compute
+    analytics or run keyword regexes in the browser.
+
+    Health rule (documented):
+      - behind_schedule: a delay keyword appears in logs/notes, OR the
+        limit_date has passed and the project is not complete, OR the schedule
+        variance (time_used% − progress%) exceeds 25 points.
+      - watch: schedule variance exceeds 10 points.
+      - on_track: otherwise.
+
+    Cacheado (TTL corto) — invalidado por invalidate_dashboard() en escrituras.
+    """
+    return cu.cached("inst:ceo_dashboard", _compute_ceo_dashboard, cu.TTL_DASHBOARD)
+
+
+def _empty_ceo_dashboard() -> dict:
+    return {
+        "summary": {
+            "total_projects": 0, "on_track": 0, "watch": 0, "behind_schedule": 0,
+            "total_devices": 0, "total_installed": 0, "overall_progress_pct": 0.0,
+        },
+        "projects": [],
+    }
+
+
+def _compute_ceo_dashboard() -> dict:
+    from django.db.models import Q
+    from django.utils import timezone
+    from apps.installations.models import ItSiteTest, SiteDeviceLog
+
+    # 1) Latest installation per active site + dates / status / owner / group
+    main_sql = """
+        SELECT
+            s.id                AS site_id,
+            s.name              AS site_name,
+            s.customer_group_id AS customer_group_id,
+            cg.name             AS customer_group,
+            ist.name            AS status,
+            u.name              AS project_owner,
+            i.id                AS installation_id,
+            i.starting_date     AS starting_date,
+            i.limit_date        AS limit_date
+        FROM sites s
+        LEFT JOIN (
+            SELECT site_id, MAX(id) AS latest_id
+            FROM installations WHERE deleted_at IS NULL GROUP BY site_id
+        ) li ON s.id = li.site_id
+        LEFT JOIN installations  i   ON i.id = li.latest_id
+        LEFT JOIN inst_statuses  ist ON i.inst_status_id  = ist.id
+        LEFT JOIN users          u   ON i.project_owner   = u.id
+        LEFT JOIN customer_groups cg ON cg.id = s.customer_group_id
+        WHERE s.deleted_at IS NULL
+        ORDER BY s.name
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(main_sql)
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    if not rows:
+        return _empty_ceo_dashboard()
+
+    site_ids = [r["site_id"] for r in rows]
+    inst_to_site = {r["installation_id"]: r["site_id"] for r in rows if r["installation_id"]}
+
+    # 2) Install progress per site (reuse batched selector)
+    progress_map = {p["site_id"]: p for p in get_all_sites_dispatch_progress(site_ids)}
+
+    # 3) Delay alerts — batched, DB-side (never pulls full log bodies to Python)
+    alert_sites: set[int] = set()
+    log_hits = (
+        SiteDeviceLog.objects
+        .filter(site_id__in=site_ids)
+        .filter(Q(notes__iregex=_DELAY_REGEX) | Q(action__iregex=_DELAY_REGEX))
+        .values_list("site_id", flat=True)
+        .distinct()
+    )
+    alert_sites.update(log_hits)
+
+    for st in ItSiteTest.objects.filter(site_id__in=site_ids).values("site_id", "delays"):
+        if st["delays"]:
+            alert_sites.add(st["site_id"])
+
+    if inst_to_site:
+        ph = ",".join(["%s"] * len(inst_to_site))
+        with connections[_DB].cursor() as cur:
+            cur.execute(
+                f"SELECT DISTINCT installation_id FROM installation_notes "
+                f"WHERE installation_id IN ({ph}) AND note REGEXP %s",
+                list(inst_to_site.keys()) + [_DELAY_REGEX],
+            )
+            for (inst_id,) in cur.fetchall():
+                site = inst_to_site.get(inst_id)
+                if site is not None:
+                    alert_sites.add(site)
+
+    # 4) Build projects + health semaphore
+    now = timezone.now()
+
+    def _aware(dt):
+        if dt is None:
+            return None
+        return timezone.make_aware(dt, timezone.utc) if timezone.is_naive(dt) else dt
+
+    buckets = {"on_track": 0, "watch": 0, "behind_schedule": 0}
+    total_installed = 0
+    total_devices = 0
+    projects = []
+
+    for r in rows:
+        site_id = r["site_id"]
+        prog = progress_map.get(site_id, {})
+        progress_pct = prog.get("pct_installed", 0.0)
+        installed = prog.get("installed", 0)
+        dev_total = prog.get("total_devices", 0)
+        total_installed += installed
+        total_devices += dev_total
+
+        start = _aware(r.get("starting_date"))
+        limit = _aware(r.get("limit_date"))
+        time_used_pct = None
+        overdue = False
+        if start and limit and limit > start:
+            span = (limit - start).total_seconds()
+            elapsed = (now - start).total_seconds()
+            time_used_pct = round(max(0.0, elapsed / span) * 100, 1)
+            overdue = now > limit and progress_pct < 100.0
+
+        has_alerts = site_id in alert_sites
+        variance = (time_used_pct - progress_pct) if time_used_pct is not None else None
+        if has_alerts or overdue or (variance is not None and variance > 25):
+            health = "behind_schedule"
+        elif variance is not None and variance > 10:
+            health = "watch"
+        else:
+            health = "on_track"
+        buckets[health] += 1
+
+        projects.append({
+            "site_id":           site_id,
+            "site_name":         r["site_name"],
+            "customer_group_id": r.get("customer_group_id"),
+            "customer_group":    r.get("customer_group"),
+            "status":            r.get("status"),
+            "project_owner":     r.get("project_owner"),
+            "starting_date":     start,
+            "limit_date":        limit,
+            "total_devices":     dev_total,
+            "installed":         installed,
+            "progress_pct":      progress_pct,
+            "time_used_pct":     time_used_pct,
+            "has_delay_alerts":  has_alerts,
+            "health":            health,
+        })
+
+    overall_pct = round(total_installed / (total_devices or 1) * 100, 1) if total_devices else 0.0
+    summary = {
+        "total_projects":       len(projects),
+        "on_track":             buckets["on_track"],
+        "watch":                buckets["watch"],
+        "behind_schedule":      buckets["behind_schedule"],
+        "total_devices":        total_devices,
+        "total_installed":      total_installed,
+        "overall_progress_pct": overall_pct,
+    }
+    return {"summary": summary, "projects": projects}
+
+
+def list_indoor_maps(site_id: int) -> list:
+    """All indoor floor-plan maps for a site (newest first)."""
+    from apps.installations.models import SiteIndoorMap
+    return list(SiteIndoorMap.objects.filter(site_id=site_id))
+
+
+def get_indoor_map(site_id: int, map_id: int):
+    """A single indoor map scoped to its site, or None."""
+    from apps.installations.models import SiteIndoorMap
+    return SiteIndoorMap.objects.filter(site_id=site_id, pk=map_id).first()
 
 
 def get_user_app_permissions(user_id: int) -> list[str]:
