@@ -38,9 +38,12 @@ class SigProject(models.Model):
     # A public, unauthenticated endpoint resolves a project by this token.
     presentation_token = models.UUIDField(null=True, blank=True, default=None)
     # Retained electronic signature record (ESIGN/UETA) for the client proposal.
-    # JSON: {signerName, signedAt, signatureDataUrl, total, currency,
-    # governingState, ip, userAgent}. NULL = not yet signed.
+    # JSON: {signerName, signedAt, method, signatureDataUrl|uploadedDocUrl,
+    # total, currency, governingState, ip, userAgent}. NULL = not yet signed.
     presentation_signature = models.JSONField(null=True, blank=True, default=None)
+    # Per-model unit prices shown in the client proposal/BOM, keyed by the
+    # device's catalogoId → price (USD). Set when the guest link is generated.
+    presentation_pricing = models.JSONField(null=True, blank=True, default=None)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -2202,8 +2202,28 @@ def _pick(d: dict, fields) -> dict:
     return {k: d[k] for k in fields if isinstance(d, dict) and k in d}
 
 
-def set_sig_project_presentation_token(*, project_id: str) -> str | None:
-    """Generate (or return the existing) guest-link token for a project."""
+def _sanitize_pricing(pricing) -> dict | None:
+    """Coerce a client {catalogoId: price} map into a clean {str: float} dict."""
+    if not isinstance(pricing, dict):
+        return None
+    clean: dict[str, float] = {}
+    for key, val in pricing.items():
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            continue
+        if num < 0:
+            continue
+        clean[str(key)[:64]] = round(num, 2)
+    return clean or None
+
+
+def set_sig_project_presentation_token(*, project_id: str, pricing=None) -> str | None:
+    """
+    Generate (or return the existing) guest-link token for a project. Optionally
+    store per-model unit prices ({catalogoId: price}) that drive the client
+    proposal/BOM. Pricing is refreshed on every call that supplies it.
+    """
     from apps.installations.models import SigProject
     import uuid as _uuid
 
@@ -2212,9 +2232,17 @@ def set_sig_project_presentation_token(*, project_id: str) -> str | None:
     except SigProject.DoesNotExist:
         return None
 
+    update_fields = ["updated_at"]
     if not project.presentation_token:
         project.presentation_token = _uuid.uuid4()
-        project.save(update_fields=["presentation_token", "updated_at"])
+        update_fields.append("presentation_token")
+
+    clean_pricing = _sanitize_pricing(pricing)
+    if clean_pricing is not None:
+        project.presentation_pricing = clean_pricing
+        update_fields.append("presentation_pricing")
+
+    project.save(update_fields=update_fields)
     return str(project.presentation_token)
 
 
@@ -2255,6 +2283,15 @@ def get_sig_project_presentation(*, token: str) -> dict | None:
     sitios = [_pick(s, _PRESENTATION_SITIO_FIELDS) for s in (data.get("sitios") or []) if isinstance(s, dict)]
     devices = [_pick(d, _PRESENTATION_DEVICE_FIELDS) for d in (data.get("devices") or []) if isinstance(d, dict)]
     drawings = [_pick(dr, _PRESENTATION_DRAWING_FIELDS) for dr in (data.get("drawings") or []) if isinstance(dr, dict)]
+
+    # Attach the admin-set unit price (per catalogoId) so the client BOM shows
+    # real prices. Pricing entered at link time is the source of truth.
+    pricing = project.presentation_pricing or {}
+    if isinstance(pricing, dict):
+        for dev in devices:
+            price = pricing.get(str(dev.get("catalogoId")))
+            if price is not None:
+                dev["price"] = price
 
     return {
         "id": str(project.id),
@@ -2316,6 +2353,60 @@ def save_sig_project_presentation_signature(
     project.presentation_signature = record
     project.save(update_fields=["presentation_signature", "updated_at"])
     return True
+
+
+# Accepted upload types and size cap for a manually-signed agreement copy.
+_UPLOAD_ALLOWED_CT = {"application/pdf", "image/png", "image/jpeg"}
+_UPLOAD_EXT = {"application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg"}
+_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def save_sig_project_presentation_uploaded_doc(
+    *, token: str, file, signer_name: str = "", ip: str | None = None, user_agent: str | None = None
+) -> str | None:
+    """
+    Store a manually-signed copy of the agreement (PDF/image) on MEDIA_ROOT and
+    record it on the project resolved by its guest-link token. Returns the file
+    URL, or None if the token/payload is invalid. Public/unauthenticated — the
+    token is the authorization.
+    """
+    from apps.installations.models import SigProject
+    from django.core.files.storage import default_storage
+    from django.utils import timezone
+    import uuid as _uuid
+
+    try:
+        token_uuid = _uuid.UUID(str(token))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+    if file is None:
+        return None
+    content_type = getattr(file, "content_type", "") or ""
+    if content_type not in _UPLOAD_ALLOWED_CT:
+        return None
+    if getattr(file, "size", 0) > _UPLOAD_MAX_BYTES:
+        return None
+
+    project = SigProject.objects.filter(presentation_token=token_uuid).first()
+    if project is None:
+        return None
+
+    ext = _UPLOAD_EXT.get(content_type, "bin")
+    name = f"presentation-signatures/{token_uuid}/{_uuid.uuid4().hex}.{ext}"
+    saved_path = default_storage.save(name, file)
+    url = default_storage.url(saved_path)
+
+    project.presentation_signature = {
+        "signerName": str(signer_name).strip()[:200],
+        "signedAt": timezone.now().isoformat(),
+        "method": "uploaded",
+        "uploadedDocUrl": url,
+        "ip": ip,
+        "userAgent": (user_agent or "")[:400],
+    }
+    project.save(update_fields=["presentation_signature", "updated_at"])
+    return url
 
 
 # ===========================================================================

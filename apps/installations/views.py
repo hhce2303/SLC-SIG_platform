@@ -835,7 +835,10 @@ class SigProjectPresentationLinkView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request: Request, project_id) -> Response:
-        token = services.set_sig_project_presentation_token(project_id=str(project_id))
+        pricing = request.data.get("pricing") if isinstance(request.data, dict) else None
+        token = services.set_sig_project_presentation_token(
+            project_id=str(project_id), pricing=pricing
+        )
         if token is None:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(
@@ -892,6 +895,36 @@ class PresentationSignView(APIView):
         if not ok:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response({"status": "signed"}, status=status.HTTP_200_OK)
+
+
+class PresentationUploadSignedView(APIView):
+    """
+    PUBLIC, unauthenticated endpoint to upload a manually-signed copy of the
+    agreement (PDF/image). The guest-link token is the authorization.
+      POST /api/v1/installations/presentation/<token>/upload-signed/  (multipart)
+    Field: file (pdf/png/jpg, ≤10 MB), optional signerName. Returns {url} or 404.
+    """
+
+    authentication_classes = []  # truly public — don't let cookie auth reject
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request: Request, token) -> Response:
+        xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+        ip = (xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR")) or None
+        ua = request.META.get("HTTP_USER_AGENT", "")
+        url = services.save_sig_project_presentation_uploaded_doc(
+            token=str(token),
+            file=request.FILES.get("file"),
+            signer_name=request.data.get("signerName", ""),
+            ip=ip,
+            user_agent=ua,
+        )
+        if url is None:
+            return Response(
+                {"detail": "Invalid token or file."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        return Response({"url": url}, status=status.HTTP_200_OK)
 
 
 # ===========================================================================
