@@ -35,3 +35,12 @@ build/
 
 # Logs
 *.log
+
+.sigtools_beta.sql
+sigtools_beta.sql
+
+export_database_complete.py
+.graphify-out/
+graphify-out/
+
+.claude/
