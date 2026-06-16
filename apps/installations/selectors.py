@@ -378,9 +378,20 @@ def _compute_sites_dashboard() -> list[dict]:
             i.Total_cameras     AS total_cameras,
             i.Total_views       AS total_views,
             i.starting_date,
-            i.limit_date
+            i.limit_date,
+            -- Pre-resolved map coordinates so the client never geocodes per-site.
+            -- Prefer the operational sites row; fall back to project_sites.
+            -- NB: longitude column is named `long` (reserved word → backticks).
+            COALESCE(s.lat, ps.lat)    AS lat,
+            COALESCE(s.`long`, ps.lon) AS lng
         FROM sites s
         LEFT JOIN site_statuses ss  ON ss.id            = s.site_status_id
+        LEFT JOIN (
+            SELECT site_id, MAX(lat) AS lat, MAX(`long`) AS lon
+            FROM project_sites
+            WHERE deleted_at IS NULL AND lat IS NOT NULL AND `long` IS NOT NULL
+            GROUP BY site_id
+        ) ps ON ps.site_id = s.id
         LEFT JOIN (
             SELECT site_id, MAX(id) AS latest_id
             FROM installations
@@ -403,6 +414,13 @@ def _compute_sites_dashboard() -> list[dict]:
         cur.execute(main_sql)
         cols = [c[0] for c in cur.description]
         rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    # Coordinates come back as Decimal — cast to float so the JSON payload
+    # carries plain numbers (the map reads them directly, no geocoding needed).
+    for r in rows:
+        if r.get("lat") is not None and r.get("lng") is not None:
+            r["lat"] = float(r["lat"])
+            r["lng"] = float(r["lng"])
 
     inst_ids = [r["installation_id"] for r in rows if r["installation_id"] is not None]
     site_ids_list = [r["id"] for r in rows]
@@ -498,6 +516,9 @@ def _compute_sites_dashboard() -> list[dict]:
             "total_views": row.get("total_views"),
             "starting_date": row.get("starting_date"),
             "limit_date": row.get("limit_date"),
+            # Pre-resolved map coordinates (null until the site is geocoded once).
+            "lat": row.get("lat"),
+            "lng": row.get("lng"),
         })
     return result
 

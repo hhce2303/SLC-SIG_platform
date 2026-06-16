@@ -3058,6 +3058,16 @@ def geocode_site(site_id: int) -> dict | None:
             lat, lng = result
             if ps_row:
                 ProjectSite.objects.using(_DB).filter(site_id=site_id).update(lat=lat, lon=lng)
+            # Always persist on the operational sites row so the dashboard list
+            # returns it and the map never has to geocode this site again.
+            try:
+                with connections[_DB].cursor() as cur:
+                    cur.execute(
+                        "UPDATE sites SET lat=%s, `long`=%s WHERE id=%s",
+                        [lat, lng, site_id],
+                    )
+            except Exception as exc:
+                logger.warning("[geocode] could not persist coords to sites %s: %s", site_id, exc)
             return {"lat": lat, "lng": lng, "source": source}
 
         logger.warning(
