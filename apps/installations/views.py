@@ -1497,11 +1497,13 @@ class NotificationListView(APIView):
 
     def get(self, request):
         unread_only = request.query_params.get("unread_only", "").lower() in ("1", "true", "yes")
+        app = request.query_params.get("app") or None  # 'inventory' | 'installations' | None
         notifications = selectors.list_notifications(
             recipient_id=request.user.id,
             unread_only=unread_only,
+            app=app,
         )
-        unread_count = selectors.count_unread_notifications(request.user.id)
+        unread_count = selectors.count_unread_notifications(request.user.id, app=app)
         serializer = NotificationSerializer(notifications, many=True)
         return Response({"results": serializer.data, "unreadCount": unread_count})
 

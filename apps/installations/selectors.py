@@ -2228,11 +2228,26 @@ def get_dashboard_init() -> dict:
 
 # ── In-app notifications ──────────────────────────────────────────────────────
 
-def list_notifications(recipient_id: int, unread_only: bool = False) -> list[dict]:
-    """Return notifications for a user ordered by most recent first."""
+# Notification types that belong to the Inventory app (everything else is shown
+# in Installations). Lets each app's bell show only its own notifications.
+_INVENTORY_NOTIF_TYPES = ("inventory_dispatch", "inventory_intake", "technician_assigned")
+
+
+def _apply_app_filter(qs, app: str | None):
+    if app == "inventory":
+        return qs.filter(type__in=_INVENTORY_NOTIF_TYPES)
+    if app == "installations":
+        return qs.exclude(type__in=_INVENTORY_NOTIF_TYPES)
+    return qs  # no app → all (backward compatible)
+
+
+def list_notifications(recipient_id: int, unread_only: bool = False, app: str | None = None) -> list[dict]:
+    """Return notifications for a user ordered by most recent first.
+    `app` ('inventory'|'installations') scopes to that app's notification types."""
     from apps.installations.models import Notification
 
     qs = Notification.objects.filter(recipient_id=recipient_id)
+    qs = _apply_app_filter(qs, app)
     if unread_only:
         qs = qs.filter(is_read=False)
     return [
@@ -2249,7 +2264,9 @@ def list_notifications(recipient_id: int, unread_only: bool = False) -> list[dic
     ]
 
 
-def count_unread_notifications(recipient_id: int) -> int:
+def count_unread_notifications(recipient_id: int, app: str | None = None) -> int:
     from apps.installations.models import Notification
 
-    return Notification.objects.filter(recipient_id=recipient_id, is_read=False).count()
+    qs = Notification.objects.filter(recipient_id=recipient_id, is_read=False)
+    qs = _apply_app_filter(qs, app)
+    return qs.count()

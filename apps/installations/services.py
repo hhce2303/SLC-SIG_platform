@@ -416,18 +416,19 @@ def set_site_technicians(*, site_id: int, user_ids: list[int], assigned_by_id: i
 
 
 def list_assigned_sites(*, user_id: int) -> list[dict]:
-    """Sites where the user is an installation responsible or the lead tech."""
+    """Sites where the user is an assigned installation technician
+    (it_installation_responsibles). Lead-tech-only sites are intentionally
+    excluded — this drives what a field technician sees in Inventory mobile."""
     sql = """
         SELECT DISTINCT s.id, s.name
         FROM sites s
         JOIN installations i ON i.site_id = s.id AND i.deleted_at IS NULL
-        LEFT JOIN it_installation_responsibles itr ON itr.installation_id = i.id
-        WHERE s.deleted_at IS NULL
-          AND (itr.user_id = %s OR i.it_lead_tech_id = %s)
+        JOIN it_installation_responsibles itr ON itr.installation_id = i.id
+        WHERE s.deleted_at IS NULL AND itr.user_id = %s
         ORDER BY s.name
     """
     with connections[_DB].cursor() as cur:
-        cur.execute(sql, [user_id, user_id])
+        cur.execute(sql, [user_id])
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
