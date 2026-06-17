@@ -37,6 +37,9 @@ class SigProject(models.Model):
     # Read-only client "guest link" token. NULL = no active share (revoked).
     # A public, unauthenticated endpoint resolves a project by this token.
     presentation_token = models.UUIDField(null=True, blank=True, default=None)
+    # Optional expiry for the guest link. NULL = permanent (never expires).
+    # The public endpoint treats an expired link the same as a revoked one.
+    presentation_expires_at = models.DateTimeField(null=True, blank=True, default=None)
     # Retained electronic signature record (ESIGN/UETA) for the client proposal.
     # JSON: {signerName, signedAt, method, signatureDataUrl|uploadedDocUrl,
     # total, currency, governingState, ip, userAgent}. NULL = not yet signed.
