@@ -27,6 +27,7 @@ urlpatterns = [
     # --- Sites ---
     path("sites/", views.SiteListView.as_view(), name="site-list"),
     path("sites/dispatch-progress/", views.SitesDispatchProgressView.as_view(), name="sites-dispatch-progress"),
+    path("sites/assigned/", views.AssignedSitesView.as_view(), name="sites-assigned"),
     path("onboarding/", views.SiteOnboardingView.as_view(), name="site-onboarding"),
     path("project-sites/", views.ProjectSiteListView.as_view(), name="project-site-list"),
     path("sites/<int:site_id>/info/", views.ProjectSiteInfoView.as_view(), name="project-site-info"),
@@ -35,6 +36,8 @@ urlpatterns = [
     path("sites/<int:site_id>/status/", views.SiteStatusView.as_view(), name="site-status"),
     path("sites/<int:site_id>/inventory/", views.SiteInventoryView.as_view(), name="site-inventory"),
     path("sites/<int:site_id>/catalog/", views.SiteDeviceCatalogView.as_view(), name="site-device-catalog"),
+    path("sites/<int:site_id>/technicians/", views.SiteTechniciansView.as_view(), name="site-technicians"),
+    path("sites/<int:site_id>/catalog/<str:device_id>/detail/", views.SiteDeviceDetailView.as_view(), name="site-device-detail"),
     path("sites/<int:site_id>/topology/validate/", views.SiteTopologyValidateView.as_view(), name="site-topology-validate"),
     path("sites/<int:site_id>/bom/", views.SiteBOMView.as_view(), name="site-bom"),
     path("sites/<int:site_id>/geocode/", views.SiteGeocodeView.as_view(), name="site-geocode"),

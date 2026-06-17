@@ -114,6 +114,11 @@ def _create_notifications_bulk(
             ],
             ignore_conflicts=True,
         )
+        # Realtime ping (no polling): every connected client refetches ITS OWN
+        # notifications. We broadcast no content per channel, so nothing leaks
+        # between users — the FE filters by the authenticated recipient.
+        _rt_publish(CH_INSTALLATIONS, "notifications_changed", {})
+        _rt_publish(CH_INVENTORY, "notifications_changed", {})
     except Exception:
         logger.exception("Failed to bulk-create notifications")
 
@@ -314,6 +319,195 @@ def _notify_dispatch_created(*, site_id: int, device_id: str, qty_sent: int | No
         )
 
 # ---------------------------------------------------------------------------
+# Recipient resolvers (by app_role) + technician assignment
+# ---------------------------------------------------------------------------
+
+def _role_user_ids(role_names: list[str]) -> list[int]:
+    """User IDs for any of the given app_role names (collation = case-insensitive)."""
+    if not role_names:
+        return []
+    placeholders = ",".join(["%s"] * len(role_names))
+    sql = f"""
+        SELECT DISTINCT u.id
+        FROM users u
+        JOIN user_app_roles uar ON uar.user_id = u.id
+        JOIN app_roles ar ON ar.id = uar.role_id
+        WHERE u.deleted_at IS NULL AND ar.name IN ({placeholders})
+    """  # noqa: S608
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, role_names)
+        return [row[0] for row in cur.fetchall()]
+
+
+def _inventory_operator_user_ids() -> list[int]:
+    """Admins + Inventory Operators — recipients of inventory-intake notices."""
+    return _role_user_ids(["admin", "inventory_op"])
+
+
+def _emails_for_user_ids(user_ids) -> list[str]:
+    user_map = _sigtools_users_by_ids({int(u) for u in user_ids if u})
+    return sorted({u["email"] for u in user_map.values() if u.get("email")})
+
+
+def _latest_installation_id(site_id: int) -> int | None:
+    sql = "SELECT id FROM installations WHERE site_id = %s AND deleted_at IS NULL ORDER BY id DESC LIMIT 1"
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [site_id])
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def get_site_technicians(*, site_id: int) -> list[dict]:
+    """Technicians assigned to a site's latest installation (it_installation_responsibles)."""
+    inst_id = _latest_installation_id(site_id)
+    if not inst_id:
+        return []
+    sql = """
+        SELECT u.id, u.username, u.name, u.email
+        FROM it_installation_responsibles itr
+        JOIN users u ON u.id = itr.user_id
+        WHERE itr.installation_id = %s AND u.deleted_at IS NULL
+        ORDER BY u.name
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [inst_id])
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def set_site_technicians(*, site_id: int, user_ids: list[int], assigned_by_id: int | None = None) -> list[dict] | None:
+    """
+    Replace the technicians assigned to a site's latest installation (reuses the
+    existing it_installation_responsibles table — no schema change). Notifies the
+    newly assigned technicians (in-app + email) and emits a realtime event so the
+    Inventory mobile app updates the technician's site list. Returns the new
+    technician list, or None if the site has no installation.
+    """
+    from apps.core import cache_utils as cu
+
+    inst_id = _latest_installation_id(site_id)
+    if not inst_id:
+        return None
+
+    existing = {t["id"] for t in get_site_technicians(site_id=site_id)}
+    clean_ids = sorted({int(u) for u in user_ids if u})
+
+    with transaction.atomic(using=_DB):
+        with connections[_DB].cursor() as cur:
+            cur.execute("DELETE FROM it_installation_responsibles WHERE installation_id = %s", [inst_id])
+            for uid in clean_ids:
+                cur.execute(
+                    "INSERT INTO it_installation_responsibles (user_id, installation_id, created_at, updated_at) "
+                    "VALUES (%s, %s, NOW(), NOW())",
+                    [uid, inst_id],
+                )
+
+    # The dashboard's it_manager column derives from this table — refresh cache.
+    cu.invalidate("inst:sites_dashboard")
+    _rt_publish(CH_INSTALLATIONS, "site_technicians_changed", {"site_id": site_id, "user_ids": clean_ids})
+    _rt_publish(CH_INVENTORY, "site_technicians_changed", {"site_id": site_id, "user_ids": clean_ids})
+
+    # Only notify the technicians newly added (not those who were already assigned).
+    newly_assigned = [uid for uid in clean_ids if uid not in existing]
+    if newly_assigned:
+        _notify_technicians_assigned(site_id=site_id, technician_ids=newly_assigned, assigned_by_id=assigned_by_id)
+
+    return get_site_technicians(site_id=site_id)
+
+
+def list_assigned_sites(*, user_id: int) -> list[dict]:
+    """Sites where the user is an installation responsible or the lead tech."""
+    sql = """
+        SELECT DISTINCT s.id, s.name
+        FROM sites s
+        JOIN installations i ON i.site_id = s.id AND i.deleted_at IS NULL
+        LEFT JOIN it_installation_responsibles itr ON itr.installation_id = i.id
+        WHERE s.deleted_at IS NULL
+          AND (itr.user_id = %s OR i.it_lead_tech_id = %s)
+        ORDER BY s.name
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [user_id, user_id])
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _notify_technicians_assigned(*, site_id: int, technician_ids: list[int], assigned_by_id: int | None) -> None:
+    """In-app + email notice to technicians newly assigned to a site."""
+    if not technician_ids:
+        return
+    with connections[_DB].cursor() as cur:
+        cur.execute("SELECT name FROM sites WHERE id = %s", [site_id])
+        row = cur.fetchone()
+    site_name = row[0] if row else f"site {site_id}"
+
+    lookup = set(technician_ids) | ({assigned_by_id} if assigned_by_id else set())
+    user_map = _sigtools_users_by_ids(lookup)
+    assigned_by_name = user_map.get(assigned_by_id, {}).get("name") or "Un administrador"
+
+    _create_notifications_bulk(
+        recipient_ids=technician_ids,
+        title=f"Asignado a instalación: {site_name}",
+        message=(
+            f"Fuiste asignado para instalar/dar servicio al sitio '{site_name}' "
+            f"por {assigned_by_name}. Revisa tus sitios en Inventory móvil."
+        ),
+        notif_type="technician_assigned",
+    )
+
+    emails = sorted({
+        user_map[uid]["email"]
+        for uid in technician_ids
+        if uid in user_map and user_map[uid].get("email")
+    })
+    if emails:
+        html = (
+            f"<p>Fuiste asignado para instalar / dar servicio al sitio <b>{escape(str(site_name))}</b>.</p>"
+            f"<p>Asignado por: <b>{escape(str(assigned_by_name))}</b></p>"
+            f"<p>Abre <b>Inventory móvil</b> para ver tus tareas asignadas.</p>"
+        )
+        _send_graph_mail_safe(
+            to_emails=emails,
+            subject=f"[SIG] Asignado a instalación: {site_name}",
+            html_content=html,
+        )
+
+
+def _notify_site_to_inventory(*, site_id, site_name: str, actor_user_id: int | None) -> None:
+    """In-app + email notice to Admins + Inventory Operators that a new site
+    landed in the system and needs equipment prepared/dispatched."""
+    recipients = _inventory_operator_user_ids()
+    if not recipients:
+        return
+    actor_name = "Un usuario"
+    if actor_user_id:
+        actor_name = _sigtools_users_by_ids({int(actor_user_id)}).get(int(actor_user_id), {}).get("name") or actor_name
+
+    _create_notifications_bulk(
+        recipient_ids=recipients,
+        title=f"Nuevo sitio en inventario: {site_name}",
+        message=(
+            f"El sitio '{site_name}' (id {site_id}) fue enviado a instalaciones/inventario "
+            f"por {actor_name}. Prepara y despacha el equipo correspondiente."
+        ),
+        notif_type="inventory_intake",
+    )
+
+    emails = _emails_for_user_ids(recipients)
+    if emails:
+        html = (
+            f"<p>El sitio <b>{escape(str(site_name))}</b> (id {site_id}) fue enviado a "
+            f"instalaciones / inventario por <b>{escape(str(actor_name))}</b>.</p>"
+            f"<p>Prepara y despacha el equipo correspondiente desde Inventory.</p>"
+        )
+        _send_graph_mail_safe(
+            to_emails=emails,
+            subject=f"[SIG] Nuevo sitio en inventario: {site_name}",
+            html_content=html,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Sites
 # ---------------------------------------------------------------------------
 
@@ -446,7 +640,19 @@ def create_site_with_installation(data: dict) -> dict:
             cur.execute(fetch_sql, [installation_id])
             cols = [c[0] for c in cur.description]
             record = cur.fetchone()
-            return dict(zip(cols, record))
+            result = dict(zip(cols, record))
+
+    # Post-commit: a new site is now in the system → notify inventory operators
+    # so they can prepare/dispatch equipment. Best-effort (never blocks creation).
+    try:
+        _notify_site_to_inventory(
+            site_id=result.get("site_id"),
+            site_name=result.get("site_name") or f"site {result.get('site_id')}",
+            actor_user_id=data.get("created_by") or data.get("project_owner"),
+        )
+    except Exception:
+        logger.exception("notify_site_to_inventory failed for site %s", result.get("site_id"))
+    return result
 
 
 def update_project_site_info(site_id: int, data: dict) -> dict | None:

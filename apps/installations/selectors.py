@@ -965,6 +965,38 @@ def get_bom_preview(devices: list[dict]) -> dict:
     }
 
 
+def _site_area_by_instance(site_id: int) -> dict[str, str]:
+    """
+    Build {canvas instanceId -> zone/area} for a site from the latest
+    installation's stored canvas design (visual_metadata). Outdoor devices carry
+    `area`; indoor devices inherit their floor-plan name. No schema change.
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(
+            "SELECT id FROM installations WHERE site_id = %s AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+            [int(site_id)],
+        )
+        row = cur.fetchone()
+    if not row:
+        return {}
+    design = get_installation_design(row[0]) or {}
+    out: dict[str, str] = {}
+    for d in (design.get("devices") or []):
+        iid = d.get("instanceId")
+        area = (d.get("area") or "").strip()
+        if iid and area:
+            out[iid] = area
+    for fp in (design.get("floorPlans") or []):
+        name = (fp.get("nombre") or fp.get("name") or "").strip()
+        if not name:
+            continue
+        for d in (fp.get("devices") or []):
+            iid = d.get("instanceId")
+            if iid:
+                out.setdefault(iid, name)
+    return out
+
+
 def get_site_device_catalog(site_id: int) -> list[dict]:
     """
     Unified device catalog for a site.
@@ -979,9 +1011,21 @@ def get_site_device_catalog(site_id: int) -> list[dict]:
     catalog = _get_site_cameras_for_catalog(site_id) + _get_site_other_devices_for_catalog(site_id)
     catalog = _enrich_catalog_serials(catalog)
 
-    # Merge dispatch overlay (physical status, qty_received, installed, etc.)
+    # Enrich FIRST: enrich_catalog_item returns a curated CatalogItem shape and
+    # drops any extra keys, so capture canvas_instance_id beforehand and apply
+    # the dispatch + zone overlay AFTER enrichment (otherwise it gets discarded).
+    cii_by_id = {item.get("id"): item.get("canvas_instance_id") for item in catalog}
+    catalog = [enrich_catalog_item(item) for item in catalog]
+
+    # Zone/area per device — derived from the stored canvas design (no schema
+    # change): canvas_instance_id → area (outdoor) or floor-plan name (indoor).
+    area_by_instance = _site_area_by_instance(site_id)
+
+    # Dispatch overlay (physical status, qty, installed, notes, evidence photos).
     dispatch_map = {d.device_id: d for d in get_site_dispatch_all(site_id)}
     for item in catalog:
+        cii = cii_by_id.get(item.get("id"))
+        item["area"]              = area_by_instance.get(cii) if cii else None
         d = dispatch_map.get(item["id"])
         item["vendor"]            = d.vendor if d else None
         item["quantity_send"]     = d.qty_sent if d else None
@@ -990,9 +1034,11 @@ def get_site_device_catalog(site_id: int) -> list[dict]:
         item["dispatched_at"]     = d.dispatched_at.isoformat() if d and d.dispatched_at else None
         item["qty_received"]      = d.qty_received if d else None
         item["received_at"]       = d.received_at.isoformat() if d and d.received_at else None
+        item["receipt_notes"]     = d.receipt_notes if d else None
         item["receipt_photo_url"] = d.receipt_photo_url if d else None
         item["installed"]         = d.installed if d else False
         item["installed_at"]      = d.installed_at.isoformat() if d and d.installed_at else None
+        item["install_notes"]     = d.install_notes if d else None
         item["install_photo_url"] = d.install_photo_url if d else None
         item["physical_status"]   = (
             "installed" if (d and d.installed)
@@ -1000,8 +1046,7 @@ def get_site_device_catalog(site_id: int) -> list[dict]:
             else "none"
         )
 
-    # Apply enricher: populates lensType/ranges/poe_watts from subtype defaults
-    return [enrich_catalog_item(item) for item in catalog]
+    return catalog
 
 
 def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
@@ -1035,6 +1080,51 @@ def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
     return catalog
 
 
+def get_device_install_detail(*, site_id: int, device_id: str) -> dict:
+    """
+    Full receipt/installation detail for one device — for the Installations
+    right-click "Installation details": WHO received/installed it (from
+    site_device_logs.user_id), WHEN, plus notes and evidence photos.
+    """
+    from apps.installations.models import SiteDeviceDispatch, SiteDeviceLog
+
+    d = SiteDeviceDispatch.objects.filter(site_id=int(site_id), device_id=device_id).first()
+
+    logs = list(
+        SiteDeviceLog.objects.filter(
+            site_id=int(site_id),
+            device_id=device_id,
+            action__in=["receipt_confirmed", "device_installed"],
+        ).order_by("-created_at").values("action", "user_id", "created_at")
+    )
+    uids = {l["user_id"] for l in logs if l["user_id"]}
+    names: dict[int, str] = {}
+    if uids:
+        ph = ",".join(["%s"] * len(uids))
+        with connections[_DB].cursor() as cur:
+            cur.execute(f"SELECT id, name FROM users WHERE id IN ({ph})", list(uids))  # noqa: S608
+            names = {r[0]: r[1] for r in cur.fetchall()}
+    who: dict[str, str | None] = {}
+    for l in logs:  # ordered newest-first → first seen per action is the latest
+        if l["action"] not in who:
+            who[l["action"]] = names.get(l["user_id"])
+
+    return {
+        "site_id": int(site_id),
+        "device_id": device_id,
+        "received_by": who.get("receipt_confirmed"),
+        "received_at": d.received_at.isoformat() if d and d.received_at else None,
+        "qty_received": d.qty_received if d else None,
+        "receipt_notes": (d.receipt_notes or None) if d else None,
+        "receipt_photo_url": (d.receipt_photo_url or None) if d else None,
+        "installed": bool(d.installed) if d else False,
+        "installed_by": who.get("device_installed"),
+        "installed_at": d.installed_at.isoformat() if d and d.installed_at else None,
+        "install_notes": (d.install_notes or None) if d else None,
+        "install_photo_url": (d.install_photo_url or None) if d else None,
+    }
+
+
 def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
     sql = """
         SELECT
@@ -1045,7 +1135,8 @@ def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
             ct.name        AS subtype,
             ct.description AS type_desc,
             d.address      AS ip,
-            v.View_name    AS view_name
+            v.View_name    AS view_name,
+            c.canvas_instance_id AS canvas_instance_id
         FROM cameras c
         JOIN camera_models cm  ON c.camera_model_id = cm.id
         JOIN camera_brands cb  ON cm.camera_brand_id = cb.id
@@ -1082,6 +1173,7 @@ def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
             "poe_budget_watts": None,
             "uplink_mbps": None,
             "view_name": row["view_name"] or None,
+            "canvas_instance_id": row.get("canvas_instance_id") or None,
         }
         for row in rows
     ]
@@ -1152,7 +1244,8 @@ def _get_site_other_devices_for_catalog(site_id: int) -> list[dict]:
             dt.model       AS name,
             dt.brand       AS brand,
             dt.device_type AS device_type,
-            d.address      AS ip
+            d.address      AS ip,
+            od.canvas_instance_id AS canvas_instance_id
         FROM other_devices od
         JOIN device_types  dt ON od.device_type_id  = dt.id
         JOIN installations i  ON od.installation_id = i.id
@@ -1195,6 +1288,7 @@ def _get_site_other_devices_for_catalog(site_id: int) -> list[dict]:
             "poe_budget_watts": None,
             "uplink_mbps": None,
             "view_name": None,
+            "canvas_instance_id": row.get("canvas_instance_id") or None,
         })
     return result
 

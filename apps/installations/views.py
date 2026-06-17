@@ -463,6 +463,62 @@ class SiteListView(APIView):
         return Response({"site_id": site_id}, status=status.HTTP_201_CREATED)
 
 
+class SiteTechniciansView(APIView):
+    """
+    GET  /sites/<site_id>/technicians/  → technicians assigned to the site
+    POST /sites/<site_id>/technicians/  → replace assignment {user_ids: [..]}
+    Reuses it_installation_responsibles. POST notifies the newly assigned techs.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int) -> Response:
+        return Response(services.get_site_technicians(site_id=int(site_id)), status=status.HTTP_200_OK)
+
+    def post(self, request: Request, site_id: int) -> Response:
+        raw = request.data.get("user_ids", []) if isinstance(request.data, dict) else []
+        try:
+            user_ids = [int(u) for u in raw]
+        except (TypeError, ValueError):
+            return Response({"detail": "user_ids must be a list of integers."}, status=status.HTTP_400_BAD_REQUEST)
+        result = services.set_site_technicians(
+            site_id=int(site_id),
+            user_ids=user_ids,
+            assigned_by_id=getattr(request.user, "id", None),
+        )
+        if result is None:
+            return Response({"detail": "Site has no installation."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class AssignedSitesView(APIView):
+    """GET /sites/assigned/ — sites assigned to the authenticated technician."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        user_id = getattr(request.user, "id", None)
+        if not user_id:
+            return Response([], status=status.HTTP_200_OK)
+        return Response(services.list_assigned_sites(user_id=int(user_id)), status=status.HTTP_200_OK)
+
+
+class SiteDeviceDetailView(APIView):
+    """
+    GET /sites/<site_id>/catalog/<device_id>/detail/
+    Receipt/installation trace for one device (who/when/notes/photos) — for the
+    Installations right-click "Installation details".
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int, device_id: str) -> Response:
+        return Response(
+            selectors.get_device_install_detail(site_id=int(site_id), device_id=str(device_id)),
+            status=status.HTTP_200_OK,
+        )
+
+
 class SiteOnboardingView(APIView):
     """
     POST /onboarding/
