@@ -3323,3 +3323,41 @@ def geocode_search(query: str, limit: int = 5) -> list[dict]:
             return []
 
     return cu.cached(cache_key, _compute, 3600)
+
+
+def geocode_reverse(lat: float, lng: float) -> dict:
+    """
+    Reverse-geocode lat/lng → {address, city, state_code, country_code} via
+    Nominatim (addressdetails), Redis-cached. Used to auto-fill the onboarding
+    City/State from the project's map location. Returns {} on failure.
+    """
+    import httpx
+
+    cache_key = f"inst:geocode:reverse:{round(float(lat), 5)}:{round(float(lng), 5)}"
+
+    def _compute():
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/reverse",
+                params={"format": "jsonv2", "lat": lat, "lon": lng, "addressdetails": 1, "zoom": 18},
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=5.0,
+            )
+            data = resp.json() or {}
+            addr = data.get("address") or {}
+            city = (
+                addr.get("city") or addr.get("town") or addr.get("village")
+                or addr.get("hamlet") or addr.get("municipality") or addr.get("county") or ""
+            )
+            iso = addr.get("ISO3166-2-lvl4") or ""  # e.g. "US-FL"
+            state_code = iso.split("-")[-1] if "-" in iso else ""
+            return {
+                "address": data.get("display_name", ""),
+                "city": city,
+                "state_code": state_code,
+                "country_code": (addr.get("country_code") or "").upper(),
+            }
+        except Exception:
+            return {}
+
+    return cu.cached(cache_key, _compute, 86400)

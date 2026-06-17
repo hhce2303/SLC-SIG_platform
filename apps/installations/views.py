@@ -316,6 +316,23 @@ class GeocodeSearchView(APIView):
         return Response(results, status=status.HTTP_200_OK)
 
 
+class GeocodeReverseView(APIView):
+    """
+    GET /geocode/reverse/?lat=<lat>&lng=<lng>
+    Reverse-geocode a coordinate → {address, city, state_code, country_code}.
+    Used to auto-fill onboarding City/State from the project's map location.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        try:
+            lat = float(request.query_params.get("lat"))
+            lng = float(request.query_params.get("lng"))
+        except (TypeError, ValueError):
+            return Response({"detail": "lat and lng are required."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(services.geocode_reverse(lat, lng), status=status.HTTP_200_OK)
+
+
 class CeoDashboardView(APIView):
     """
     GET /metrics/ceo-dashboard/
