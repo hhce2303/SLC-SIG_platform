@@ -2424,20 +2424,14 @@ def _sanitize_pricing(pricing) -> dict | None:
     return clean or None
 
 
-def set_sig_project_presentation_token(*, project_id: str, pricing=None, ttl_hours=None) -> dict | None:
+def set_sig_project_presentation_token(*, project_id: str, pricing=None) -> str | None:
     """
     Generate (or return the existing) guest-link token for a project. Optionally
     store per-model unit prices ({catalogoId: price}) that drive the client
-    proposal/BOM, and an expiry.
-
-    ttl_hours: positive number → link expires that many hours from now;
-               None / 0 / falsy → permanent (expires_at cleared).
-    The expiry is (re)set on every call so re-generating updates the lifetime.
-    Returns {"token": str, "expires_at": iso|None} or None if not found.
+    proposal/BOM. The link is permanent until revoked. Returns the token string,
+    or None if the project is not found.
     """
     from apps.installations.models import SigProject
-    from django.utils import timezone
-    from datetime import timedelta
     import uuid as _uuid
 
     try:
@@ -2455,22 +2449,8 @@ def set_sig_project_presentation_token(*, project_id: str, pricing=None, ttl_hou
         project.presentation_pricing = clean_pricing
         update_fields.append("presentation_pricing")
 
-    # Expiry: a positive ttl_hours sets a future expiry; anything falsy means
-    # permanent (NULL). Guard against absurd values.
-    try:
-        hours = float(ttl_hours) if ttl_hours is not None else 0
-    except (TypeError, ValueError):
-        hours = 0
-    project.presentation_expires_at = (
-        timezone.now() + timedelta(hours=hours) if hours and hours > 0 else None
-    )
-    update_fields.append("presentation_expires_at")
-
     project.save(update_fields=update_fields)
-    return {
-        "token": str(project.presentation_token),
-        "expires_at": project.presentation_expires_at.isoformat() if project.presentation_expires_at else None,
-    }
+    return str(project.presentation_token)
 
 
 def revoke_sig_project_presentation_token(*, project_id: str) -> bool:
