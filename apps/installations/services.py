@@ -375,6 +375,30 @@ def get_site_technicians(*, site_id: int) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def _create_minimal_installation(site_id: int, lead_tech_id: int) -> int | None:
+    """
+    Create a minimal installation for a site that has none, so a technician can
+    be assigned (it_installation_responsibles is keyed by installation_id).
+    Uses the 'Pending' status and the first installation_type. Returns the new
+    installation id, or None if the required catalog rows are missing.
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
+        st = cur.fetchone()
+        cur.execute("SELECT id FROM installation_types ORDER BY id LIMIT 1")
+        ty = cur.fetchone()
+        if not st or not ty:
+            return None
+        cur.execute(
+            "INSERT INTO installations "
+            "(site_id, inst_status_id, it_lead_tech_id, installation_type_id, "
+            " Total_cameras, Total_views, total_hours, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, 0, 0, 0.0, NOW(), NOW())",
+            [site_id, st[0], lead_tech_id, ty[0]],
+        )
+        return cur.lastrowid
+
+
 def set_site_technicians(*, site_id: int, user_ids: list[int], assigned_by_id: int | None = None) -> list[dict] | None:
     """
     Replace the technicians assigned to a site's latest installation (reuses the
@@ -385,12 +409,18 @@ def set_site_technicians(*, site_id: int, user_ids: list[int], assigned_by_id: i
     """
     from apps.core import cache_utils as cu
 
+    clean_ids = sorted({int(u) for u in user_ids if u})
     inst_id = _latest_installation_id(site_id)
-    if not inst_id:
-        return None
+    if inst_id is None:
+        # Site has no installation yet → create a minimal one so the assignment
+        # has a home and the site appears in the technician's "my sites".
+        if not clean_ids:
+            return []  # nothing to assign and nothing to create
+        inst_id = _create_minimal_installation(site_id, lead_tech_id=clean_ids[0])
+        if inst_id is None:
+            return None
 
     existing = {t["id"] for t in get_site_technicians(site_id=site_id)}
-    clean_ids = sorted({int(u) for u in user_ids if u})
 
     with transaction.atomic(using=_DB):
         with connections[_DB].cursor() as cur:
