@@ -1,0 +1,88 @@
+name: Deploy to MKS
+
+# Auto-deploy al servidor MKS (192.168.1.69) en cada push a main.
+# Corre en un self-hosted runner instalado en MKS porque el servidor tiene IP
+# de LAN privada inalcanzable desde los runners cloud de GitHub.
+# Replica el proceso manual de docs/DEPLOYMENT.md operando in-place sobre el
+# stack existente (preserva .env de produccion y el volumen media_data).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-mks
+  cancel-in-progress: false   # nunca cancelar un deploy a medias
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, windows]
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: 'C:\Users\jjacome\Documents\GitHub\SLC-SIG_platform'
+    env:
+      COMPOSE: 'docker compose -f docker/docker-compose.yml'
+
+    steps:
+      - name: Sync code in-place
+        # NO usamos actions/checkout: clonaria en el workdir del runner y romperia
+        # la identidad del proyecto Compose (container_name fijos + volumen media_data).
+        run: |
+          $before = (git rev-parse HEAD).Trim()
+          git fetch origin main
+          git reset --hard origin/main
+          $after = (git rev-parse HEAD).Trim()
+          "BEFORE=$before" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "AFTER=$after"   | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "Deploying $before -> $after"
+
+      - name: Detect changed files
+        run: |
+          $changed = git diff --name-only $env:BEFORE $env:AFTER
+          Write-Host "Changed files:`n$changed"
+          $nginx = [bool]($changed | Select-String -Pattern '^docker/nginx\.conf/')
+          "NGINX_CHANGED=$nginx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build image
+        # Construye la nueva imagen sin tocar los contenedores corriendo.
+        run: iex "$env:COMPOSE build"
+
+      - name: Test gate (pytest)
+        # Corre los tests en un contenedor efimero desde la imagen recien construida.
+        # base.txt ya esta instalado en la imagen; solo faltan estos 3 wheels (puros).
+        # SQLite via config.settings.test; READ_DOT_ENV=False evita leer el .env de prod.
+        # Si pytest falla, el job se detiene ANTES de tocar produccion.
+        run: |
+          iex "$env:COMPOSE run --rm --no-deps --entrypoint sh ``
+            -e DJANGO_SETTINGS_MODULE=config.settings.test ``
+            -e READ_DOT_ENV=False ``
+            web -c 'pip install --no-cache-dir pytest pytest-django factory-boy && pytest -p no:cacheprovider'"
+
+      - name: Deploy (recreate containers)
+        # up -d recrea los contenedores cuya imagen cambio; las migraciones corren
+        # solas en docker/entrypoint.sh al arrancar web.
+        run: iex "$env:COMPOSE up -d"
+
+      - name: Restart nginx (only if its config changed)
+        # nginx monta su config por bind-mount; up -d no la recarga si solo cambio
+        # el archivo, asi que reiniciamos explicitamente cuando docker/nginx.conf/** cambia.
+        if: env.NGINX_CHANGED == 'True'
+        run: iex "$env:COMPOSE restart nginx"
+
+      - name: Health check
+        run: |
+          $ok = $false
+          foreach ($i in 1..10) {
+            try {
+              iex "$env:COMPOSE exec -T web curl -fsS http://localhost:8000/api/v1/health/"
+              $ok = $true
+              break
+            } catch {
+              Write-Host "Health check attempt $i failed; retrying in 6s..."
+              Start-Sleep -Seconds 6
+            }
+          }
+          iex "$env:COMPOSE ps"
+          if (-not $ok) { throw 'Health check failed after 10 attempts' }

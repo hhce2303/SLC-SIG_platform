@@ -108,6 +108,49 @@ docker exec SIGplatform-web python manage.py <command>
 
 ---
 
+## CI/CD — Auto-deploy (GitHub Actions)
+
+Pushes to `main` deploy automatically via [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml).
+The workflow runs the same steps as *Routine Operations* but unattended: it syncs the code
+in-place, builds the image, runs a **pytest gate**, recreates the containers, restarts nginx
+only if its config changed, and health-checks the result.
+
+### Why a self-hosted runner
+
+MKS (`192.168.1.69`) is on a private LAN that GitHub's cloud runners cannot reach. The workflow
+therefore runs on a **self-hosted runner installed on MKS itself**, operating directly on the
+stack at `C:\Users\jjacome\Documents\GitHub\SLC-SIG_platform` so that `.env` (gitignored) and the
+named `media_data` volume are preserved. No GitHub Secrets are required.
+
+### One-time runner setup on MKS
+
+1. In GitHub: **Repo → Settings → Actions → Runners → New self-hosted runner** (Windows x64).
+   Follow the download/configure commands shown there.
+2. Add the label `windows` when prompted (the workflow targets `runs-on: [self-hosted, windows]`).
+3. Install it **as a service** (`./svc.sh install` / the `Install` step of `config.cmd`) so it
+   survives reboots. The service account must:
+   - have access to Docker Desktop (be able to run `docker compose`),
+   - have read/write on `C:\Users\jjacome\Documents\GitHub\SLC-SIG_platform`,
+   - have `git` on its `PATH`.
+4. Ensure that stack directory has the production `.env` present and a clean working tree
+   (the workflow runs `git reset --hard origin/main`, discarding uncommitted local changes).
+
+### What the workflow does
+
+| Step | Action |
+|---|---|
+| Sync | `git fetch` + `git reset --hard origin/main` in-place |
+| Detect | computes changed files to decide whether nginx needs a restart |
+| Build | `docker compose build` (does not disrupt running containers) |
+| Test gate | runs `pytest` in an ephemeral container; **aborts the deploy if tests fail** |
+| Deploy | `docker compose up -d` (migrations run via `entrypoint.sh`) |
+| nginx | `restart nginx` **only** when `docker/nginx.conf/**` changed (bind-mounted config) |
+| Health | retries `GET /api/v1/health/` on the `web` container, then prints `ps` |
+
+Trigger it manually anytime via **Actions → Deploy to MKS → Run workflow** (`workflow_dispatch`).
+
+---
+
 ## Architecture Notes
 
 - **nginx** (port 80) → reverse-proxies to **web** (port 8000, internal only)
