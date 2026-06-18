@@ -1,0 +1,93 @@
+name: Deploy target (reusable)
+
+# Reusable deploy used by deploy.yml for each target (local / mks).
+# Parameterized by runner label, stack directory and compose files so the
+# SAME logic runs on any self-hosted Windows runner without hardcoding paths.
+
+on:
+  workflow_call:
+    inputs:
+      runner_label:
+        description: Unique runner label identifying the machine (e.g. local, mks)
+        required: true
+        type: string
+      stack_dir:
+        description: Absolute path to the stack checkout on that runner
+        required: true
+        type: string
+      compose_files:
+        description: "docker compose -f flags for this target"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-${{ inputs.runner_label }}
+  cancel-in-progress: false   # never cancel a deploy mid-flight
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, windows, "${{ inputs.runner_label }}"]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: ${{ inputs.stack_dir }}
+    env:
+      COMPOSE: docker compose ${{ inputs.compose_files }}
+
+    steps:
+      - name: Sync code in-place (main)
+        # NO actions/checkout: we operate on the runner's dedicated stack checkout
+        # so container_name + named volumes keep their identity. -f discards tracked
+        # changes; untracked files (.env, init-db/*.sql dumps) are preserved.
+        run: |
+          $before = (git rev-parse HEAD).Trim()
+          git fetch origin main --prune
+          git checkout -f -B main origin/main
+          git reset --hard origin/main
+          $after = (git rev-parse HEAD).Trim()
+          "BEFORE=$before" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "AFTER=$after"   | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "[$env:RUNNER_NAME] deploying $before -> $after in $(Get-Location)"
+
+      - name: Detect changed files
+        run: |
+          $changed = git diff --name-only $env:BEFORE $env:AFTER
+          Write-Host "Changed files:`n$changed"
+          $nginx = [bool]($changed | Select-String -Pattern '^docker/nginx\.conf/')
+          "NGINX_CHANGED=$nginx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build image
+        run: iex "$env:COMPOSE build"
+
+      - name: Test gate (pytest)
+        # SQLite via config.settings.test; READ_DOT_ENV=False ignores the .env DBs.
+        # `python -m pytest` (not `pytest`): the pip install lands in the non-root
+        # user's /app/.local/bin which is not on PATH. Fails the job before deploy.
+        run: |
+          iex "$env:COMPOSE run --rm --no-deps --entrypoint sh ``
+            -e DJANGO_SETTINGS_MODULE=config.settings.test ``
+            -e READ_DOT_ENV=False ``
+            web -c 'pip install --no-cache-dir --quiet pytest pytest-django factory-boy && python -m pytest -p no:cacheprovider'"
+
+      - name: Deploy (recreate containers)
+        run: iex "$env:COMPOSE up -d"
+
+      - name: Restart nginx (only if its config changed)
+        if: env.NGINX_CHANGED == 'True'
+        run: iex "$env:COMPOSE restart nginx"
+
+      - name: Health check
+        run: |
+          $ok = $false
+          foreach ($i in 1..10) {
+            try {
+              iex "$env:COMPOSE exec -T web curl -fsS http://localhost:8000/api/v1/health/"
+              $ok = $true; break
+            } catch {
+              Write-Host "Health check attempt $i failed; retrying in 6s..."
+              Start-Sleep -Seconds 6
+            }
+          }
+          iex "$env:COMPOSE ps"
+          if (-not $ok) { throw 'Health check failed after 10 attempts' }

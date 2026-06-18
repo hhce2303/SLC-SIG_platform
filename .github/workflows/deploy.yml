@@ -1,0 +1,43 @@
+name: Deploy
+
+# Auto-deploy on push to main. Runs on self-hosted Windows runners.
+# Two targets, each pinned to its own runner label and stack directory:
+#
+#   local : this PC — local production mirror (docker-compose.local.yml)
+#   mks   : MKS server 192.168.1.69 — production (docker-compose.yml only)
+#
+# Both call the reusable workflow .github/workflows/deploy-target.yml so the
+# logic (sync -> build -> pytest gate -> up -> nginx -> health) lives in ONE place.
+#
+# Required repository VARIABLES (Settings -> Secrets and variables -> Actions -> Variables):
+#   STACK_DIR_LOCAL : absolute path to the stack checkout on this PC's runner
+#   STACK_DIR_MKS   : absolute path to the stack checkout on the MKS runner
+#   MKS_ENABLED     : set to "true" only once the MKS runner is configured (default off)
+#   LOCAL_ENABLED   : set to "false" to disable the local target (default on)
+#
+# Runner labels: each runner must carry a unique label ("local" or "mks") on top
+# of the default "self-hosted" + "windows" labels.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  local:
+    # Active by default; skipped (grey, not failed) until STACK_DIR_LOCAL is set.
+    if: vars.LOCAL_ENABLED != 'false' && vars.STACK_DIR_LOCAL != ''
+    uses: ./.github/workflows/deploy-target.yml
+    with:
+      runner_label: local
+      stack_dir: ${{ vars.STACK_DIR_LOCAL }}
+      compose_files: -f docker/docker-compose.yml -f docker/docker-compose.local.yml
+
+  mks:
+    # Stays skipped until you configure the MKS runner and set MKS_ENABLED=true.
+    if: vars.MKS_ENABLED == 'true' && vars.STACK_DIR_MKS != ''
+    uses: ./.github/workflows/deploy-target.yml
+    with:
+      runner_label: mks
+      stack_dir: ${{ vars.STACK_DIR_MKS }}
+      compose_files: -f docker/docker-compose.yml
