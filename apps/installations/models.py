@@ -34,6 +34,19 @@ class SigProject(models.Model):
     created_by = models.BigIntegerField(null=True, blank=True)
     approval_requested_by = models.BigIntegerField(null=True, blank=True)
     approval_status = models.CharField(max_length=30, default="draft")
+    # Read-only client "guest link" token. NULL = no active share (revoked).
+    # A public, unauthenticated endpoint resolves a project by this token.
+    presentation_token = models.UUIDField(null=True, blank=True, default=None)
+    # Optional expiry for the guest link. NULL = permanent (never expires).
+    # The public endpoint treats an expired link the same as a revoked one.
+    presentation_expires_at = models.DateTimeField(null=True, blank=True, default=None)
+    # Retained electronic signature record (ESIGN/UETA) for the client proposal.
+    # JSON: {signerName, signedAt, method, signatureDataUrl|uploadedDocUrl,
+    # total, currency, governingState, ip, userAgent}. NULL = not yet signed.
+    presentation_signature = models.JSONField(null=True, blank=True, default=None)
+    # Per-model unit prices shown in the client proposal/BOM, keyed by the
+    # device's catalogoId → price (USD). Set when the guest link is generated.
+    presentation_pricing = models.JSONField(null=True, blank=True, default=None)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -41,7 +54,10 @@ class SigProject(models.Model):
         app_label = "installations"
         db_table = "sig_projects"
         ordering = ["-updated_at"]
-        indexes = [models.Index(fields=["updated_at"], name="sig_projects_updated_at_idx")]
+        indexes = [
+            models.Index(fields=["updated_at"], name="sig_projects_updated_at_idx"),
+            models.Index(fields=["presentation_token"], name="sig_projects_pres_tok_idx"),
+        ]
 
     def __str__(self):
         return self.name

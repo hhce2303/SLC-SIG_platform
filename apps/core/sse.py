@@ -31,20 +31,29 @@ MSG_TIMEOUT = 1.0    # máximo tiempo bloqueado esperando un mensaje Redis
 @sync_to_async
 def _resolve_user(request) -> bool:
     """
-    Valida la identidad del cliente SSE UNA vez al abrir la conexión.
+    Valida la identidad del cliente SSE al abrir la conexión.
     Acepta dos mecanismos (en orden de prioridad):
-      1. Cookie sig_token  → valida via Sanctum (SigtoolsCookieAuthentication)
-      2. JWT Bearer        → valida via simplejwt (DailyUser)
+      1. Cookie sig_token  → vía SigtoolsCookieAuthentication (cacheada en Redis
+         60s, el mismo path que usa toda la API). CRÍTICO: el EventSource se
+         reconecta seguido; validar el token contra la BD remota en cada intento
+         (token_utils.validate_token sin caché) provocaba 401 intermitentes y
+         mataba el tiempo real. Reusar el autenticador cacheado lo evita.
+      2. JWT Bearer        → valida via simplejwt.
     Retorna True si autenticado, False si no.
     """
-    # --- 1. Cookie Sigtools ---
+    # --- 1. Cookie Sigtools (cacheada) ---
     cookie_name = getattr(settings, "SIGTOOLS_COOKIE_NAME", "sig_token")
-    client_token = request.COOKIES.get(cookie_name)
-    if client_token:
-        from apps.sigtools_auth import token_utils
-        pat = token_utils.validate_token(client_token)
-        if pat is not None:
-            return True
+    if request.COOKIES.get(cookie_name):
+        from rest_framework.exceptions import AuthenticationFailed
+        from apps.sigtools_auth.authentication import SigtoolsCookieAuthentication
+        try:
+            if SigtoolsCookieAuthentication().authenticate(request) is not None:
+                return True
+        except AuthenticationFailed:
+            return False
+        except Exception:
+            logger.exception("SSE cookie auth error")
+            return False
 
     # --- 2. JWT Bearer ---
     auth_header = request.META.get("HTTP_AUTHORIZATION", "")
@@ -60,17 +69,19 @@ def _resolve_user(request) -> bool:
     return False
 
 
-async def sse_stream(channel: str, request) -> HttpResponse:
+async def sse_stream(channels: "str | list[str]", request) -> HttpResponse:
     """
     Autentica al cliente y devuelve un StreamingHttpResponse text/event-stream,
-    o un 401 si no está autenticado.
+    o un 401 si no está autenticado. `channels` puede ser un canal único (str)
+    o varios (list) — el stream multiplexa todos en una sola conexión.
     """
     authenticated = await _resolve_user(request)
     if not authenticated:
         return HttpResponse(status=401)
 
+    chans = [channels] if isinstance(channels, str) else list(channels)
     response = StreamingHttpResponse(
-        _event_generator(channel, request),
+        _event_generator(chans, request),
         content_type="text/event-stream",
     )
     response["Cache-Control"] = "no-cache"
@@ -93,10 +104,10 @@ async def _client_disconnected(request) -> bool:
         return False
 
 
-async def _event_generator(channel: str, request):
+async def _event_generator(channels: list[str], request):
     client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     pubsub = client.pubsub()
-    await pubsub.subscribe(channel)
+    await pubsub.subscribe(*channels)
     last_beat = time.monotonic()
 
     try:
@@ -118,7 +129,7 @@ async def _event_generator(channel: str, request):
                     env = json.loads(msg["data"])
                     yield f"event: {env['event']}\ndata: {json.dumps(env['data'])}\n\n"
                 except (KeyError, json.JSONDecodeError) as exc:
-                    logger.warning("sse bad message on %s: %s", channel, exc)
+                    logger.warning("sse bad message on %s: %s", channels, exc)
 
             now = time.monotonic()
             if now - last_beat >= HEARTBEAT_SECS:
@@ -132,7 +143,7 @@ async def _event_generator(channel: str, request):
         raise  # re-propagar después del finally
     finally:
         try:
-            await pubsub.unsubscribe(channel)
+            await pubsub.unsubscribe(*channels)
             await pubsub.aclose()
             await client.aclose()
         except Exception:

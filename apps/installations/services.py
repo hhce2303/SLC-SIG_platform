@@ -45,15 +45,17 @@ def _sigtools_users_by_ids(user_ids: set[int]) -> dict[int, dict[str, Any]]:
 
 
 def _sigtools_admin_emails() -> list[str]:
+    # Admin membership lives in the app-level RBAC tables (user_app_roles / app_roles),
+    # which is what /me and the admin panel use — NOT the legacy user_roles/roles.
     sql = """
         SELECT DISTINCT u.email
         FROM users u
-        JOIN user_roles ur ON ur.user_id = u.id
-        JOIN roles r ON r.id = ur.role_id
+        JOIN user_app_roles uar ON uar.user_id = u.id
+        JOIN app_roles ar ON ar.id = uar.role_id
         WHERE u.deleted_at IS NULL
           AND u.email IS NOT NULL
           AND u.email <> ''
-          AND r.name = 'Admin'
+          AND ar.name = 'Admin'
     """
     with connections[_DB].cursor() as cur:
         cur.execute(sql)
@@ -62,13 +64,16 @@ def _sigtools_admin_emails() -> list[str]:
 
 def _sigtools_admin_user_ids() -> list[int]:
     """Return user IDs of all Admin-role sigtools users (for in-app notifications)."""
+    # Must match the RBAC source used by auth (user_app_roles / app_roles); querying
+    # the legacy user_roles/roles returned no admins, so approval notifications were
+    # never created.
     sql = """
         SELECT DISTINCT u.id
         FROM users u
-        JOIN user_roles ur ON ur.user_id = u.id
-        JOIN roles r ON r.id = ur.role_id
+        JOIN user_app_roles uar ON uar.user_id = u.id
+        JOIN app_roles ar ON ar.id = uar.role_id
         WHERE u.deleted_at IS NULL
-          AND r.name = 'Admin'
+          AND ar.name = 'Admin'
     """
     with connections[_DB].cursor() as cur:
         cur.execute(sql)
@@ -109,6 +114,11 @@ def _create_notifications_bulk(
             ],
             ignore_conflicts=True,
         )
+        # Realtime ping (no polling): every connected client refetches ITS OWN
+        # notifications. We broadcast no content per channel, so nothing leaks
+        # between users — the FE filters by the authenticated recipient.
+        _rt_publish(CH_INSTALLATIONS, "notifications_changed", {})
+        _rt_publish(CH_INVENTORY, "notifications_changed", {})
     except Exception:
         logger.exception("Failed to bulk-create notifications")
 
@@ -160,37 +170,49 @@ def _notify_project_approval_requested(*, project: dict, requester_name: str | N
         )
 
 
-def _notify_project_approval_cancelled(*, project: dict, requester_name: str | None, note: str) -> None:
-    admin_emails = _sigtools_admin_emails()
-    admin_user_ids = _sigtools_admin_user_ids()
+def _notify_project_approval_cancelled(
+    *,
+    project: dict,
+    requester_id: int | None,
+    canceller_name: str | None,
+    note: str,
+) -> None:
+    # The cancellation notice goes to the user who ORIGINALLY requested approval
+    # (so they learn it was cancelled) — NOT to the admins.
+    if not requester_id:
+        return
 
-    if admin_emails:
-        safe_name = escape(project.get("name") or "(sin nombre)")
-        safe_requester = escape(requester_name or "Usuario")
-        safe_note = escape(note or "")
+    requester = _sigtools_users_by_ids({requester_id}).get(requester_id, {})
+    requester_email = requester.get("email")
+
+    safe_name = escape(project.get("name") or "(sin nombre)")
+    safe_canceller = escape(canceller_name or "Un administrador")
+    safe_note = escape(note or "")
+
+    if requester_email:
         html = (
-            f"<p>Se canceló la solicitud de aprobación para el proyecto GIS <b>{safe_name}</b>.</p>"
-            f"<p>Cancelado por: <b>{safe_requester}</b></p>"
+            f"<p>Tu solicitud de aprobación para el proyecto GIS <b>{safe_name}</b> fue cancelada.</p>"
+            f"<p>Cancelada por: <b>{safe_canceller}</b></p>"
         )
         if safe_note:
             html += f"<p>Nota: {safe_note}</p>"
         _send_graph_mail_safe(
-            to_emails=admin_emails,
-            subject=f"[Installations] Approval request cancelled: {project.get('name')}",
+            to_emails=[requester_email],
+            subject=f"[Installations] Tu solicitud de aprobación fue cancelada: {project.get('name')}",
             html_content=html,
         )
 
-    if admin_user_ids:
-        _create_notifications_bulk(
-            recipient_ids=admin_user_ids,
-            title=f"Aprobación cancelada: {project.get('name', '')}",
-            message=(
-                f"{requester_name or 'Un usuario'} canceló la solicitud de aprobación para el proyecto "
-                f"'{project.get('name', '')}'. {('Nota: ' + note) if note else ''}"
-            ).strip(),
-            notif_type="approval_cancelled",
-            related_project_id=project.get("id"),
-        )
+    _create_notifications_bulk(
+        recipient_ids=[requester_id],
+        title=f"Solicitud cancelada: {project.get('name', '')}",
+        message=(
+            f"Tu solicitud de aprobación para el proyecto '{project.get('name', '')}' fue cancelada"
+            f"{(' por ' + canceller_name) if canceller_name else ''}."
+            f"{(' Nota: ' + note) if note else ''}"
+        ).strip(),
+        notif_type="approval_cancelled",
+        related_project_id=project.get("id"),
+    )
 
 
 def _notify_project_promoted_to_onboarding(
@@ -295,6 +317,226 @@ def _notify_dispatch_created(*, site_id: int, device_id: str, qty_sent: int | No
             ),
             notif_type="inventory_dispatch",
         )
+
+# ---------------------------------------------------------------------------
+# Recipient resolvers (by app_role) + technician assignment
+# ---------------------------------------------------------------------------
+
+def _role_user_ids(role_names: list[str]) -> list[int]:
+    """User IDs for any of the given app_role names (collation = case-insensitive)."""
+    if not role_names:
+        return []
+    placeholders = ",".join(["%s"] * len(role_names))
+    sql = f"""
+        SELECT DISTINCT u.id
+        FROM users u
+        JOIN user_app_roles uar ON uar.user_id = u.id
+        JOIN app_roles ar ON ar.id = uar.role_id
+        WHERE u.deleted_at IS NULL AND ar.name IN ({placeholders})
+    """  # noqa: S608
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, role_names)
+        return [row[0] for row in cur.fetchall()]
+
+
+def _inventory_operator_user_ids() -> list[int]:
+    """Admins + Inventory Operators — recipients of inventory-intake notices."""
+    return _role_user_ids(["admin", "inventory_op"])
+
+
+def _emails_for_user_ids(user_ids) -> list[str]:
+    user_map = _sigtools_users_by_ids({int(u) for u in user_ids if u})
+    return sorted({u["email"] for u in user_map.values() if u.get("email")})
+
+
+def _latest_installation_id(site_id: int) -> int | None:
+    sql = "SELECT id FROM installations WHERE site_id = %s AND deleted_at IS NULL ORDER BY id DESC LIMIT 1"
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [site_id])
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def get_site_technicians(*, site_id: int) -> list[dict]:
+    """Technicians assigned to a site's latest installation (it_installation_responsibles)."""
+    inst_id = _latest_installation_id(site_id)
+    if not inst_id:
+        return []
+    sql = """
+        SELECT u.id, u.username, u.name, u.email
+        FROM it_installation_responsibles itr
+        JOIN users u ON u.id = itr.user_id
+        WHERE itr.installation_id = %s AND u.deleted_at IS NULL
+        ORDER BY u.name
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [inst_id])
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _create_minimal_installation(site_id: int, lead_tech_id: int) -> int | None:
+    """
+    Create a minimal installation for a site that has none, so a technician can
+    be assigned (it_installation_responsibles is keyed by installation_id).
+    Uses the 'Pending' status and the first installation_type. Returns the new
+    installation id, or None if the required catalog rows are missing.
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute("SELECT id FROM inst_statuses WHERE name = 'Pending' LIMIT 1")
+        st = cur.fetchone()
+        cur.execute("SELECT id FROM installation_types ORDER BY id LIMIT 1")
+        ty = cur.fetchone()
+        if not st or not ty:
+            return None
+        cur.execute(
+            "INSERT INTO installations "
+            "(site_id, inst_status_id, it_lead_tech_id, installation_type_id, "
+            " Total_cameras, Total_views, total_hours, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, 0, 0, 0.0, NOW(), NOW())",
+            [site_id, st[0], lead_tech_id, ty[0]],
+        )
+        return cur.lastrowid
+
+
+def set_site_technicians(*, site_id: int, user_ids: list[int], assigned_by_id: int | None = None) -> list[dict] | None:
+    """
+    Replace the technicians assigned to a site's latest installation (reuses the
+    existing it_installation_responsibles table — no schema change). Notifies the
+    newly assigned technicians (in-app + email) and emits a realtime event so the
+    Inventory mobile app updates the technician's site list. Returns the new
+    technician list, or None if the site has no installation.
+    """
+    from apps.core import cache_utils as cu
+
+    clean_ids = sorted({int(u) for u in user_ids if u})
+    inst_id = _latest_installation_id(site_id)
+    if inst_id is None:
+        # Site has no installation yet → create a minimal one so the assignment
+        # has a home and the site appears in the technician's "my sites".
+        if not clean_ids:
+            return []  # nothing to assign and nothing to create
+        inst_id = _create_minimal_installation(site_id, lead_tech_id=clean_ids[0])
+        if inst_id is None:
+            return None
+
+    existing = {t["id"] for t in get_site_technicians(site_id=site_id)}
+
+    with transaction.atomic(using=_DB):
+        with connections[_DB].cursor() as cur:
+            cur.execute("DELETE FROM it_installation_responsibles WHERE installation_id = %s", [inst_id])
+            for uid in clean_ids:
+                cur.execute(
+                    "INSERT INTO it_installation_responsibles (user_id, installation_id, created_at, updated_at) "
+                    "VALUES (%s, %s, NOW(), NOW())",
+                    [uid, inst_id],
+                )
+
+    # The dashboard's it_manager column derives from this table — refresh cache.
+    cu.invalidate("inst:sites_dashboard")
+    _rt_publish(CH_INSTALLATIONS, "site_technicians_changed", {"site_id": site_id, "user_ids": clean_ids})
+    _rt_publish(CH_INVENTORY, "site_technicians_changed", {"site_id": site_id, "user_ids": clean_ids})
+
+    # Only notify the technicians newly added (not those who were already assigned).
+    newly_assigned = [uid for uid in clean_ids if uid not in existing]
+    if newly_assigned:
+        _notify_technicians_assigned(site_id=site_id, technician_ids=newly_assigned, assigned_by_id=assigned_by_id)
+
+    return get_site_technicians(site_id=site_id)
+
+
+def list_assigned_sites(*, user_id: int) -> list[dict]:
+    """Sites where the user is an assigned installation technician
+    (it_installation_responsibles). Lead-tech-only sites are intentionally
+    excluded — this drives what a field technician sees in Inventory mobile."""
+    sql = """
+        SELECT DISTINCT s.id, s.name
+        FROM sites s
+        JOIN installations i ON i.site_id = s.id AND i.deleted_at IS NULL
+        JOIN it_installation_responsibles itr ON itr.installation_id = i.id
+        WHERE s.deleted_at IS NULL AND itr.user_id = %s
+        ORDER BY s.name
+    """
+    with connections[_DB].cursor() as cur:
+        cur.execute(sql, [user_id])
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _notify_technicians_assigned(*, site_id: int, technician_ids: list[int], assigned_by_id: int | None) -> None:
+    """In-app + email notice to technicians newly assigned to a site."""
+    if not technician_ids:
+        return
+    with connections[_DB].cursor() as cur:
+        cur.execute("SELECT name FROM sites WHERE id = %s", [site_id])
+        row = cur.fetchone()
+    site_name = row[0] if row else f"site {site_id}"
+
+    lookup = set(technician_ids) | ({assigned_by_id} if assigned_by_id else set())
+    user_map = _sigtools_users_by_ids(lookup)
+    assigned_by_name = user_map.get(assigned_by_id, {}).get("name") or "Un administrador"
+
+    _create_notifications_bulk(
+        recipient_ids=technician_ids,
+        title=f"Asignado a instalación: {site_name}",
+        message=(
+            f"Fuiste asignado para instalar/dar servicio al sitio '{site_name}' "
+            f"por {assigned_by_name}. Revisa tus sitios en Inventory móvil."
+        ),
+        notif_type="technician_assigned",
+    )
+
+    emails = sorted({
+        user_map[uid]["email"]
+        for uid in technician_ids
+        if uid in user_map and user_map[uid].get("email")
+    })
+    if emails:
+        html = (
+            f"<p>Fuiste asignado para instalar / dar servicio al sitio <b>{escape(str(site_name))}</b>.</p>"
+            f"<p>Asignado por: <b>{escape(str(assigned_by_name))}</b></p>"
+            f"<p>Abre <b>Inventory móvil</b> para ver tus tareas asignadas.</p>"
+        )
+        _send_graph_mail_safe(
+            to_emails=emails,
+            subject=f"[SIG] Asignado a instalación: {site_name}",
+            html_content=html,
+        )
+
+
+def _notify_site_to_inventory(*, site_id, site_name: str, actor_user_id: int | None) -> None:
+    """In-app + email notice to Admins + Inventory Operators that a new site
+    landed in the system and needs equipment prepared/dispatched."""
+    recipients = _inventory_operator_user_ids()
+    if not recipients:
+        return
+    actor_name = "Un usuario"
+    if actor_user_id:
+        actor_name = _sigtools_users_by_ids({int(actor_user_id)}).get(int(actor_user_id), {}).get("name") or actor_name
+
+    _create_notifications_bulk(
+        recipient_ids=recipients,
+        title=f"Nuevo sitio en inventario: {site_name}",
+        message=(
+            f"El sitio '{site_name}' (id {site_id}) fue enviado a instalaciones/inventario "
+            f"por {actor_name}. Prepara y despacha el equipo correspondiente."
+        ),
+        notif_type="inventory_intake",
+    )
+
+    emails = _emails_for_user_ids(recipients)
+    if emails:
+        html = (
+            f"<p>El sitio <b>{escape(str(site_name))}</b> (id {site_id}) fue enviado a "
+            f"instalaciones / inventario por <b>{escape(str(actor_name))}</b>.</p>"
+            f"<p>Prepara y despacha el equipo correspondiente desde Inventory.</p>"
+        )
+        _send_graph_mail_safe(
+            to_emails=emails,
+            subject=f"[SIG] Nuevo sitio en inventario: {site_name}",
+            html_content=html,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Sites
@@ -429,7 +671,19 @@ def create_site_with_installation(data: dict) -> dict:
             cur.execute(fetch_sql, [installation_id])
             cols = [c[0] for c in cur.description]
             record = cur.fetchone()
-            return dict(zip(cols, record))
+            result = dict(zip(cols, record))
+
+    # Post-commit: a new site is now in the system → notify inventory operators
+    # so they can prepare/dispatch equipment. Best-effort (never blocks creation).
+    try:
+        _notify_site_to_inventory(
+            site_id=result.get("site_id"),
+            site_name=result.get("site_name") or f"site {result.get('site_id')}",
+            actor_user_id=data.get("created_by") or data.get("project_owner"),
+        )
+    except Exception:
+        logger.exception("notify_site_to_inventory failed for site %s", result.get("site_id"))
+    return result
 
 
 def update_project_site_info(site_id: int, data: dict) -> dict | None:
@@ -1394,8 +1648,18 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
                         [new_device_id, row_id],
                     )
 
-    # Fetch created devices and emit SSE events for real-time sync
+    # Fetch created devices and emit SSE events for real-time sync.
+    # Also build id_remap: {canvas instanceId -> new "cam-<id>"/"device-<id>"} via
+    # canvas_instance_id, so the frontend can repoint each design device's
+    # catalogoId to the row that now backs it at this site. Without this the
+    # design keeps referencing the source catalog IDs and won't render once
+    # reopened with the destination site's catalog.
     created_device_ids = []
+    id_remap: dict[str, str] = {}
+    all_instance_ids = [
+        (d.get("instanceId") or d.get("id")) for d in all_devices
+        if (d.get("instanceId") or d.get("id"))
+    ]
     try:
         with connections[_DB].cursor() as cur:
             if camera_params:
@@ -1412,6 +1676,25 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
                 )
                 for row in cur.fetchall():
                     created_device_ids.append(f"device-{row[0]}")
+
+            if all_instance_ids:
+                ph = ",".join(["%s"] * len(all_instance_ids))
+                cur.execute(
+                    f"SELECT canvas_instance_id, id FROM cameras "
+                    f"WHERE installation_id = %s AND canvas_instance_id IN ({ph}) AND deleted_at IS NULL",
+                    [installation_id, *all_instance_ids],
+                )
+                for canvas_iid, cam_id in cur.fetchall():
+                    if canvas_iid:
+                        id_remap[canvas_iid] = f"cam-{cam_id}"
+                cur.execute(
+                    f"SELECT canvas_instance_id, id FROM other_devices "
+                    f"WHERE installation_id = %s AND canvas_instance_id IN ({ph}) AND deleted_at IS NULL",
+                    [installation_id, *all_instance_ids],
+                )
+                for canvas_iid, dev_id in cur.fetchall():
+                    if canvas_iid:
+                        id_remap[canvas_iid] = f"device-{dev_id}"
     except Exception as exc:
         logger.warning("[export] failed to fetch created devices for SSE: %s", exc)
 
@@ -1428,6 +1711,7 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
         "skipped": skipped,
         "numbering": numbering,
         "renumbered": renumbered,
+        "id_remap": id_remap,
     }
 
 
@@ -2041,6 +2325,9 @@ def delete_sig_project(project_id: str) -> bool:
     from apps.installations.models import SigProject
 
     deleted_count, _ = SigProject.objects.filter(pk=project_id).delete()
+    if deleted_count > 0:
+        # Realtime: let other tabs drop it from their project list.
+        _rt_publish(CH_PROJECTS, "project_deleted", {"id": str(project_id)})
     return deleted_count > 0
 
 
@@ -2105,18 +2392,259 @@ def cancel_sig_project_approval(
     except SigProject.DoesNotExist:
         return None
 
+    # Capture the original requester BEFORE clearing it — they receive the
+    # cancellation notice. `requested_by` is whoever performed the cancel (admin).
+    original_requester_id = project.approval_requested_by
+
     project.approval_status = "draft"
     project.approval_requested_by = None
     project.save(update_fields=["approval_status", "approval_requested_by", "updated_at"])
 
     result = _project_to_dict(project)
-    requester_name = _sigtools_users_by_ids({requested_by}).get(requested_by, {}).get("name") if requested_by else None
+    canceller_name = _sigtools_users_by_ids({requested_by}).get(requested_by, {}).get("name") if requested_by else None
 
     transaction.on_commit(
-        lambda: _notify_project_approval_cancelled(project=result, requester_name=requester_name, note=note),
+        lambda: _notify_project_approval_cancelled(
+            project=result,
+            requester_id=original_requester_id,
+            canceller_name=canceller_name,
+            note=note,
+        ),
     )
     transaction.on_commit(lambda: _publish_project(result))
     return result
+
+
+# ===========================================================================
+# Client presentation "guest link" — public read-only share of a SigProject
+# ===========================================================================
+
+# Fields of a device exposed to the (untrusted) client view. Anything not here
+# is stripped — keep it to what's needed to RENDER the design, never internals.
+_PRESENTATION_DEVICE_FIELDS = (
+    "instanceId", "catalogoId", "numero", "displayLabel", "lat", "lng",
+    "rotacionBase", "area", "varifocal_mm", "ptz_orientacion", "ptz_zoom",
+    "alcance_metros", "sensorOverrides", "sitioId",
+    # Optional per-unit price for the client proposal/BOM. Absent today (the
+    # designer UI does not set it); the client view falls back to an estimate.
+    "price",
+)
+_PRESENTATION_SITIO_FIELDS = ("id", "nombre", "lat", "lng", "zoom")
+_PRESENTATION_DRAWING_FIELDS = (
+    "id", "type", "coordinates", "color", "label", "sitioId", "layer", "radius", "text",
+)
+
+
+def _pick(d: dict, fields) -> dict:
+    return {k: d[k] for k in fields if isinstance(d, dict) and k in d}
+
+
+def _sanitize_pricing(pricing) -> dict | None:
+    """Coerce a client {catalogoId: price} map into a clean {str: float} dict."""
+    if not isinstance(pricing, dict):
+        return None
+    clean: dict[str, float] = {}
+    for key, val in pricing.items():
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            continue
+        if num < 0:
+            continue
+        clean[str(key)[:64]] = round(num, 2)
+    return clean or None
+
+
+def set_sig_project_presentation_token(*, project_id: str, pricing=None) -> str | None:
+    """
+    Generate (or return the existing) guest-link token for a project. Optionally
+    store per-model unit prices ({catalogoId: price}) that drive the client
+    proposal/BOM. The link is permanent until revoked. Returns the token string,
+    or None if the project is not found.
+    """
+    from apps.installations.models import SigProject
+    import uuid as _uuid
+
+    try:
+        project = SigProject.objects.get(pk=project_id)
+    except SigProject.DoesNotExist:
+        return None
+
+    update_fields = ["updated_at"]
+    if not project.presentation_token:
+        project.presentation_token = _uuid.uuid4()
+        update_fields.append("presentation_token")
+
+    clean_pricing = _sanitize_pricing(pricing)
+    if clean_pricing is not None:
+        project.presentation_pricing = clean_pricing
+        update_fields.append("presentation_pricing")
+
+    project.save(update_fields=update_fields)
+    return str(project.presentation_token)
+
+
+def revoke_sig_project_presentation_token(*, project_id: str) -> bool:
+    """Revoke the guest link (token → NULL). Returns False if not found."""
+    from apps.installations.models import SigProject
+
+    try:
+        project = SigProject.objects.get(pk=project_id)
+    except SigProject.DoesNotExist:
+        return False
+
+    project.presentation_token = None
+    project.save(update_fields=["presentation_token", "updated_at"])
+    return True
+
+
+def get_sig_project_presentation(*, token: str) -> dict | None:
+    """
+    Resolve a project by its guest-link token and return a SANITIZED read-only
+    payload (only what a client needs to view the design — no prices, no other
+    projects, no internal metadata). Returns None if the token is invalid or
+    revoked.
+    """
+    from apps.installations.models import SigProject
+    import uuid as _uuid
+
+    try:
+        token_uuid = _uuid.UUID(str(token))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+    project = SigProject.objects.filter(presentation_token=token_uuid).first()
+    if project is None:
+        return None
+
+    data = project.data or {}
+    sitios = [_pick(s, _PRESENTATION_SITIO_FIELDS) for s in (data.get("sitios") or []) if isinstance(s, dict)]
+    devices = [_pick(d, _PRESENTATION_DEVICE_FIELDS) for d in (data.get("devices") or []) if isinstance(d, dict)]
+    drawings = [_pick(dr, _PRESENTATION_DRAWING_FIELDS) for dr in (data.get("drawings") or []) if isinstance(dr, dict)]
+
+    # Attach the admin-set unit price (per catalogoId) so the client BOM shows
+    # real prices. Pricing entered at link time is the source of truth.
+    pricing = project.presentation_pricing or {}
+    if isinstance(pricing, dict):
+        for dev in devices:
+            price = pricing.get(str(dev.get("catalogoId")))
+            if price is not None:
+                dev["price"] = price
+
+    return {
+        "id": str(project.id),
+        "name": project.name,
+        "sitios": sitios,
+        "devices": devices,
+        "drawings": drawings,
+    }
+
+
+# Max length of the base64 signature image we accept (~350 KB data URL). Guards
+# against an oversized/abusive payload on this public, unauthenticated endpoint.
+_SIGNATURE_DATAURL_MAX = 350_000
+
+
+def save_sig_project_presentation_signature(
+    *, token: str, signature: dict, ip: str | None = None, user_agent: str | None = None
+) -> bool:
+    """
+    Record a client's electronic signature (ESIGN/UETA) against the project
+    resolved by its guest-link token. Public/unauthenticated — the token is the
+    authorization. Returns False if the token is invalid/revoked or the payload
+    fails validation. Stores a sanitized record (whitelisted keys only).
+    """
+    from apps.installations.models import SigProject
+    from django.utils import timezone
+    import uuid as _uuid
+
+    try:
+        token_uuid = _uuid.UUID(str(token))
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+    if not isinstance(signature, dict):
+        return False
+
+    signer = str(signature.get("signerName", "")).strip()[:200]
+    data_url = signature.get("signatureDataUrl", "")
+    if not signer or not isinstance(data_url, str):
+        return False
+    if not data_url.startswith("data:image/") or len(data_url) > _SIGNATURE_DATAURL_MAX:
+        return False
+
+    project = SigProject.objects.filter(presentation_token=token_uuid).first()
+    if project is None:
+        return False
+
+    # Whitelisted, server-stamped record — never trust client-supplied metadata.
+    record = {
+        "signerName": signer,
+        "signatureDataUrl": data_url,
+        "signedAt": timezone.now().isoformat(),
+        "total": signature.get("total"),
+        "currency": str(signature.get("currency", "USD"))[:8],
+        "governingState": str(signature.get("governingState", ""))[:80],
+        "ip": ip,
+        "userAgent": (user_agent or "")[:400],
+    }
+    project.presentation_signature = record
+    project.save(update_fields=["presentation_signature", "updated_at"])
+    return True
+
+
+# Accepted upload types and size cap for a manually-signed agreement copy.
+_UPLOAD_ALLOWED_CT = {"application/pdf", "image/png", "image/jpeg"}
+_UPLOAD_EXT = {"application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg"}
+_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def save_sig_project_presentation_uploaded_doc(
+    *, token: str, file, signer_name: str = "", ip: str | None = None, user_agent: str | None = None
+) -> str | None:
+    """
+    Store a manually-signed copy of the agreement (PDF/image) on MEDIA_ROOT and
+    record it on the project resolved by its guest-link token. Returns the file
+    URL, or None if the token/payload is invalid. Public/unauthenticated — the
+    token is the authorization.
+    """
+    from apps.installations.models import SigProject
+    from django.core.files.storage import default_storage
+    from django.utils import timezone
+    import uuid as _uuid
+
+    try:
+        token_uuid = _uuid.UUID(str(token))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+    if file is None:
+        return None
+    content_type = getattr(file, "content_type", "") or ""
+    if content_type not in _UPLOAD_ALLOWED_CT:
+        return None
+    if getattr(file, "size", 0) > _UPLOAD_MAX_BYTES:
+        return None
+
+    project = SigProject.objects.filter(presentation_token=token_uuid).first()
+    if project is None:
+        return None
+
+    ext = _UPLOAD_EXT.get(content_type, "bin")
+    name = f"presentation-signatures/{token_uuid}/{_uuid.uuid4().hex}.{ext}"
+    saved_path = default_storage.save(name, file)
+    url = default_storage.url(saved_path)
+
+    project.presentation_signature = {
+        "signerName": str(signer_name).strip()[:200],
+        "signedAt": timezone.now().isoformat(),
+        "method": "uploaded",
+        "uploadedDocUrl": url,
+        "ip": ip,
+        "userAgent": (user_agent or "")[:400],
+    }
+    project.save(update_fields=["presentation_signature", "updated_at"])
+    return url
 
 
 # ===========================================================================
@@ -2386,12 +2914,23 @@ from apps.installations.models import SiteDeviceDispatch, SiteDeviceLog  # noqa:
 
 
 def _publish_dispatch(dispatch: "SiteDeviceDispatch") -> None:
+    # Push the site's freshly-recomputed aggregate progress INSIDE the event so
+    # the front-end updates its dashboard from the stream alone — no follow-up
+    # HTTP fetch (the old SSE→refetch behaved like polling under load).
+    progress = None
+    try:
+        from apps.installations.selectors import get_all_sites_dispatch_progress
+        rows = get_all_sites_dispatch_progress([dispatch.site_id])
+        progress = rows[0] if rows else None
+    except Exception:
+        progress = None
     _rt_publish(CH_INSTALLATIONS, "dispatch_updated", [{
         "site_id":      dispatch.site_id,
         "device_id":    dispatch.device_id,
         "installed":    dispatch.installed,
         "qty_received": dispatch.qty_received,
         "qty_sent":     dispatch.qty_sent,
+        "progress":     progress,
     }])
 
 
@@ -2757,6 +3296,16 @@ def geocode_site(site_id: int) -> dict | None:
             lat, lng = result
             if ps_row:
                 ProjectSite.objects.using(_DB).filter(site_id=site_id).update(lat=lat, lon=lng)
+            # Always persist on the operational sites row so the dashboard list
+            # returns it and the map never has to geocode this site again.
+            try:
+                with connections[_DB].cursor() as cur:
+                    cur.execute(
+                        "UPDATE sites SET lat=%s, `long`=%s WHERE id=%s",
+                        [lat, lng, site_id],
+                    )
+            except Exception as exc:
+                logger.warning("[geocode] could not persist coords to sites %s: %s", site_id, exc)
             return {"lat": lat, "lng": lng, "source": source}
 
         logger.warning(
@@ -2806,3 +3355,41 @@ def geocode_search(query: str, limit: int = 5) -> list[dict]:
             return []
 
     return cu.cached(cache_key, _compute, 3600)
+
+
+def geocode_reverse(lat: float, lng: float) -> dict:
+    """
+    Reverse-geocode lat/lng → {address, city, state_code, country_code} via
+    Nominatim (addressdetails), Redis-cached. Used to auto-fill the onboarding
+    City/State from the project's map location. Returns {} on failure.
+    """
+    import httpx
+
+    cache_key = f"inst:geocode:reverse:{round(float(lat), 5)}:{round(float(lng), 5)}"
+
+    def _compute():
+        try:
+            resp = httpx.get(
+                f"{_NOMINATIM_BASE}/reverse",
+                params={"format": "jsonv2", "lat": lat, "lon": lng, "addressdetails": 1, "zoom": 18},
+                headers={"User-Agent": _NOMINATIM_UA},
+                timeout=5.0,
+            )
+            data = resp.json() or {}
+            addr = data.get("address") or {}
+            city = (
+                addr.get("city") or addr.get("town") or addr.get("village")
+                or addr.get("hamlet") or addr.get("municipality") or addr.get("county") or ""
+            )
+            iso = addr.get("ISO3166-2-lvl4") or ""  # e.g. "US-FL"
+            state_code = iso.split("-")[-1] if "-" in iso else ""
+            return {
+                "address": data.get("display_name", ""),
+                "city": city,
+                "state_code": state_code,
+                "country_code": (addr.get("country_code") or "").upper(),
+            }
+        except Exception:
+            return {}
+
+    return cu.cached(cache_key, _compute, 86400)

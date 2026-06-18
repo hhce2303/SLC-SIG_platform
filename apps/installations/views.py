@@ -15,7 +15,7 @@ from django.views import View
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -164,6 +164,31 @@ class SiteDeviceCatalogView(APIView):
         return Response(selectors.get_site_device_catalog(site_id), status=status.HTTP_200_OK)
 
 
+class CatalogByIdsView(APIView):
+    """
+    GET /catalog/by-ids/?ids=cam-168,cam-165
+
+    Supplemental catalog fetch: returns enriched catalog items for specific
+    device IDs (e.g. cam-168) regardless of which site they belong to.
+    Used by the frontend when a project contains devices whose catalogoId is
+    not covered by the current site's catalog (e.g. cameras placed in a
+    previous session from a different site).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        ids_param = request.query_params.get("ids", "")
+        raw_ids = [i.strip() for i in ids_param.split(",") if i.strip()]
+        camera_ids = []
+        for raw in raw_ids:
+            if raw.startswith("cam-"):
+                try:
+                    camera_ids.append(int(raw[4:]))
+                except ValueError:
+                    pass
+        return Response(selectors.get_cameras_by_ids(camera_ids), status=status.HTTP_200_OK)
+
+
 class SiteTopologyValidateView(APIView):
     """
     POST /sites/<site_id>/topology/validate/
@@ -289,6 +314,23 @@ class GeocodeSearchView(APIView):
         limit = min(int(request.query_params.get("limit", 5) or 5), 10)
         results = services.geocode_search(query, limit)
         return Response(results, status=status.HTTP_200_OK)
+
+
+class GeocodeReverseView(APIView):
+    """
+    GET /geocode/reverse/?lat=<lat>&lng=<lng>
+    Reverse-geocode a coordinate → {address, city, state_code, country_code}.
+    Used to auto-fill onboarding City/State from the project's map location.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        try:
+            lat = float(request.query_params.get("lat"))
+            lng = float(request.query_params.get("lng"))
+        except (TypeError, ValueError):
+            return Response({"detail": "lat and lng are required."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(services.geocode_reverse(lat, lng), status=status.HTTP_200_OK)
 
 
 class CeoDashboardView(APIView):
@@ -436,6 +478,62 @@ class SiteListView(APIView):
 
         cu.invalidate_dashboard()
         return Response({"site_id": site_id}, status=status.HTTP_201_CREATED)
+
+
+class SiteTechniciansView(APIView):
+    """
+    GET  /sites/<site_id>/technicians/  → technicians assigned to the site
+    POST /sites/<site_id>/technicians/  → replace assignment {user_ids: [..]}
+    Reuses it_installation_responsibles. POST notifies the newly assigned techs.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int) -> Response:
+        return Response(services.get_site_technicians(site_id=int(site_id)), status=status.HTTP_200_OK)
+
+    def post(self, request: Request, site_id: int) -> Response:
+        raw = request.data.get("user_ids", []) if isinstance(request.data, dict) else []
+        try:
+            user_ids = [int(u) for u in raw]
+        except (TypeError, ValueError):
+            return Response({"detail": "user_ids must be a list of integers."}, status=status.HTTP_400_BAD_REQUEST)
+        result = services.set_site_technicians(
+            site_id=int(site_id),
+            user_ids=user_ids,
+            assigned_by_id=getattr(request.user, "id", None),
+        )
+        if result is None:
+            return Response({"detail": "Site has no installation."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class AssignedSitesView(APIView):
+    """GET /sites/assigned/ — sites assigned to the authenticated technician."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        user_id = getattr(request.user, "id", None)
+        if not user_id:
+            return Response([], status=status.HTTP_200_OK)
+        return Response(services.list_assigned_sites(user_id=int(user_id)), status=status.HTTP_200_OK)
+
+
+class SiteDeviceDetailView(APIView):
+    """
+    GET /sites/<site_id>/catalog/<device_id>/detail/
+    Receipt/installation trace for one device (who/when/notes/photos) — for the
+    Installations right-click "Installation details".
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, site_id: int, device_id: str) -> Response:
+        return Response(
+            selectors.get_device_install_detail(site_id=int(site_id), device_id=str(device_id)),
+            status=status.HTTP_200_OK,
+        )
 
 
 class SiteOnboardingView(APIView):
@@ -800,6 +898,108 @@ class SigProjectCancelApprovalView(APIView):
         return Response(project, status=status.HTTP_200_OK)
 
 
+class SigProjectPresentationLinkView(APIView):
+    """
+    Manage the read-only client "guest link" for a project (auth required).
+      POST   /sig-projects/<uuid>/presentation-link/  → generate/return token
+      DELETE /sig-projects/<uuid>/presentation-link/  → revoke (token → NULL)
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request, project_id) -> Response:
+        pricing = request.data.get("pricing") if isinstance(request.data, dict) else None
+        token = services.set_sig_project_presentation_token(
+            project_id=str(project_id), pricing=pricing
+        )
+        if token is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"token": token, "path": f"/presentation/{token}"},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request: Request, project_id) -> Response:
+        ok = services.revoke_sig_project_presentation_token(project_id=str(project_id))
+        if not ok:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PresentationDetailView(APIView):
+    """
+    PUBLIC, unauthenticated read-only view of a shared project.
+      GET /api/v1/installations/presentation/<token>/
+    Returns a sanitized payload (name + sitios + devices + drawings) or 404.
+    """
+
+    authentication_classes = []  # truly public — don't let cookie auth reject
+    permission_classes = [AllowAny]
+
+    def get(self, request: Request, token) -> Response:
+        data = services.get_sig_project_presentation(token=str(token))
+        if data is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class PresentationSignView(APIView):
+    """
+    PUBLIC, unauthenticated endpoint to record a client's electronic signature
+    on the proposal (ESIGN/UETA). The guest-link token is the authorization.
+      POST /api/v1/installations/presentation/<token>/sign/
+    Body: {signerName, signatureDataUrl, total, currency, governingState, ...}
+    Returns 200 on success, 404 if the token is invalid/revoked or payload bad.
+    """
+
+    authentication_classes = []  # truly public — don't let cookie auth reject
+    permission_classes = [AllowAny]
+
+    def post(self, request: Request, token) -> Response:
+        xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+        ip = (xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR")) or None
+        ua = request.META.get("HTTP_USER_AGENT", "")
+        ok = services.save_sig_project_presentation_signature(
+            token=str(token),
+            signature=request.data if isinstance(request.data, dict) else {},
+            ip=ip,
+            user_agent=ua,
+        )
+        if not ok:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"status": "signed"}, status=status.HTTP_200_OK)
+
+
+class PresentationUploadSignedView(APIView):
+    """
+    PUBLIC, unauthenticated endpoint to upload a manually-signed copy of the
+    agreement (PDF/image). The guest-link token is the authorization.
+      POST /api/v1/installations/presentation/<token>/upload-signed/  (multipart)
+    Field: file (pdf/png/jpg, ≤10 MB), optional signerName. Returns {url} or 404.
+    """
+
+    authentication_classes = []  # truly public — don't let cookie auth reject
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request: Request, token) -> Response:
+        xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+        ip = (xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR")) or None
+        ua = request.META.get("HTTP_USER_AGENT", "")
+        url = services.save_sig_project_presentation_uploaded_doc(
+            token=str(token),
+            file=request.FILES.get("file"),
+            signer_name=request.data.get("signerName", ""),
+            ip=ip,
+            user_agent=ua,
+        )
+        if url is None:
+            return Response(
+                {"detail": "Invalid token or file."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        return Response({"url": url}, status=status.HTTP_200_OK)
+
+
 # ===========================================================================
 # Supabase — Admin
 # ===========================================================================
@@ -1121,16 +1321,18 @@ async def installations_sse_stream(request):
 async def projects_sse_stream(request):
     """
     GET /api/v1/installations/projects/stream/
-    Server-Sent Events: escucha el canal Redis rt:projects.
+    Server-Sent Events: bus UNIFICADO del front-end. Multiplexa los 3 canales
+    Redis en una sola conexión EventSource (el front se conecta solo a este
+    endpoint vía syncBus.ts), así recibe TODOS los eventos:
 
-    Eventos:
-      project_updated      — SigProject (BD local) cambió
-      installation_updated — installations en sigtools
-      project_site_updated — project_sites en sigtools
+      rt:projects      → project_updated/created/deleted, installation_updated, project_site_updated
+      rt:installations → dispatch_updated, site_updated, device_status_changed,
+                         device_received, device_installed, activity_logged
+      rt:inventory     → article_updated
     """
-    from apps.core.realtime import CH_PROJECTS
+    from apps.core.realtime import CH_INSTALLATIONS, CH_INVENTORY, CH_PROJECTS
     from apps.core.sse import sse_stream
-    return await sse_stream(CH_PROJECTS, request)
+    return await sse_stream([CH_PROJECTS, CH_INSTALLATIONS, CH_INVENTORY], request)
 
 
 # ---------------------------------------------------------------------------
@@ -1295,11 +1497,13 @@ class NotificationListView(APIView):
 
     def get(self, request):
         unread_only = request.query_params.get("unread_only", "").lower() in ("1", "true", "yes")
+        app = request.query_params.get("app") or None  # 'inventory' | 'installations' | None
         notifications = selectors.list_notifications(
             recipient_id=request.user.id,
             unread_only=unread_only,
+            app=app,
         )
-        unread_count = selectors.count_unread_notifications(request.user.id)
+        unread_count = selectors.count_unread_notifications(request.user.id, app=app)
         serializer = NotificationSerializer(notifications, many=True)
         return Response({"results": serializer.data, "unreadCount": unread_count})
 

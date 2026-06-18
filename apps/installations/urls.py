@@ -11,6 +11,7 @@ urlpatterns = [
     path("catalog/devices/", views.DeviceCatalogView.as_view(), name="catalog-devices"),
     path("catalog/vms/", views.VMSCatalogView.as_view(), name="catalog-vms"),
     path("catalog/installation-types/", views.InstallationTypesCatalogView.as_view(), name="catalog-installation-types"),
+    path("catalog/by-ids/", views.CatalogByIdsView.as_view(), name="catalog-by-ids"),
 
     # --- Customer groups ---
     path("customer-groups/", views.CustomerGroupsView.as_view(), name="customer-groups"),
@@ -26,6 +27,7 @@ urlpatterns = [
     # --- Sites ---
     path("sites/", views.SiteListView.as_view(), name="site-list"),
     path("sites/dispatch-progress/", views.SitesDispatchProgressView.as_view(), name="sites-dispatch-progress"),
+    path("sites/assigned/", views.AssignedSitesView.as_view(), name="sites-assigned"),
     path("onboarding/", views.SiteOnboardingView.as_view(), name="site-onboarding"),
     path("project-sites/", views.ProjectSiteListView.as_view(), name="project-site-list"),
     path("sites/<int:site_id>/info/", views.ProjectSiteInfoView.as_view(), name="project-site-info"),
@@ -34,6 +36,8 @@ urlpatterns = [
     path("sites/<int:site_id>/status/", views.SiteStatusView.as_view(), name="site-status"),
     path("sites/<int:site_id>/inventory/", views.SiteInventoryView.as_view(), name="site-inventory"),
     path("sites/<int:site_id>/catalog/", views.SiteDeviceCatalogView.as_view(), name="site-device-catalog"),
+    path("sites/<int:site_id>/technicians/", views.SiteTechniciansView.as_view(), name="site-technicians"),
+    path("sites/<int:site_id>/catalog/<str:device_id>/detail/", views.SiteDeviceDetailView.as_view(), name="site-device-detail"),
     path("sites/<int:site_id>/topology/validate/", views.SiteTopologyValidateView.as_view(), name="site-topology-validate"),
     path("sites/<int:site_id>/bom/", views.SiteBOMView.as_view(), name="site-bom"),
     path("sites/<int:site_id>/geocode/", views.SiteGeocodeView.as_view(), name="site-geocode"),
@@ -59,6 +63,12 @@ urlpatterns = [
     path("sig-projects/<uuid:project_id>/name/", views.SigProjectRenameView.as_view(), name="sig-project-rename"),
     path("sig-projects/<uuid:project_id>/request-approval/", views.SigProjectRequestApprovalView.as_view(), name="sig-project-request-approval"),
     path("sig-projects/<uuid:project_id>/cancel-approval-request/", views.SigProjectCancelApprovalView.as_view(), name="sig-project-cancel-approval-request"),
+    path("sig-projects/<uuid:project_id>/presentation-link/", views.SigProjectPresentationLinkView.as_view(), name="sig-project-presentation-link"),
+
+    # --- Public read-only client presentation (NO auth) ---
+    path("presentation/<uuid:token>/", views.PresentationDetailView.as_view(), name="presentation-detail"),
+    path("presentation/<uuid:token>/sign/", views.PresentationSignView.as_view(), name="presentation-sign"),
+    path("presentation/<uuid:token>/upload-signed/", views.PresentationUploadSignedView.as_view(), name="presentation-upload-signed"),
 
     # --- Admin (sigtools_beta) ---
     path("admin/users/", views.AdminUsersView.as_view(), name="admin-users"),
@@ -81,6 +91,7 @@ urlpatterns = [
 
     # --- Geocoding proxy ---
     path("geocode/search/", views.GeocodeSearchView.as_view(), name="geocode-search"),
+    path("geocode/reverse/", views.GeocodeReverseView.as_view(), name="geocode-reverse"),
 
     # --- BOM preview (design-time, not site-bound) ---
     path("bom/preview/", views.BomPreviewView.as_view(), name="bom-preview"),

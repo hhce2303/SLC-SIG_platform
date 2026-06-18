@@ -1,0 +1,28 @@
+# Production HTTPS overlay for api.sig.systems.
+#
+# Use ALONGSIDE the base file and set NGINX_CONF so nginx loads the TLS config:
+#
+#   NGINX_CONF=default.ssl.conf \
+#     docker compose -f docker-compose.yml -f docker-compose.ssl.yml up -d
+#
+# (First-time cert issuance: see docker/HTTPS.md — run certbot standalone once
+#  before bringing nginx up with this overlay.)
+
+services:
+  nginx:
+    ports:
+      - "443:443"            # appended to the base "80:80"
+    volumes:
+      # Let's Encrypt certs (read by default.ssl.conf) + ACME webroot for renewals.
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+
+  # Auto-renews the certificate every 12h (webroot challenge via the running nginx).
+  certbot:
+    image: certbot/certbot
+    container_name: SIGplatform-certbot
+    restart: unless-stopped
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'

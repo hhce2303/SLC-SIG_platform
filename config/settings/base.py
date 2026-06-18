@@ -318,10 +318,12 @@ TEAMS_WEBHOOK_URL = env("TEAMS_WEBHOOK_URL", default="")
 # ---------------------------------------------------------------------------
 # Microsoft Graph Mail (Client Credentials)
 # ---------------------------------------------------------------------------
-MS_GRAPH_TENANT_ID = env("MS_GRAPH_TENANT_ID", default="")
-MS_GRAPH_CLIENT_ID = env("MS_GRAPH_CLIENT_ID", default="")
-MS_GRAPH_CLIENT_SECRET = env("MS_GRAPH_CLIENT_SECRET", default="")
-MS_GRAPH_SENDER = env("MS_GRAPH_SENDER", default="")
+# Accept either the MS_GRAPH_* names or the MICROSOFT_* names (fallback) so the
+# same .env works regardless of which convention the environment uses.
+MS_GRAPH_TENANT_ID = env("MS_GRAPH_TENANT_ID", default="") or env("MICROSOFT_TENANT_ID", default="")
+MS_GRAPH_CLIENT_ID = env("MS_GRAPH_CLIENT_ID", default="") or env("MICROSOFT_CLIENT_ID", default="")
+MS_GRAPH_CLIENT_SECRET = env("MS_GRAPH_CLIENT_SECRET", default="") or env("MICROSOFT_CLIENT_SECRET", default="")
+MS_GRAPH_SENDER = env("MS_GRAPH_SENDER", default="") or env("MICROSOFT_SENDER", default="")
 
 # ---------------------------------------------------------------------------
 # drf-spectacular (OpenAPI)
