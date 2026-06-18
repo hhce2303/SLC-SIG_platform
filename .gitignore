@@ -53,6 +53,11 @@ export_database_complete.py
 sigtools_beta.sql
 *.sql.bak
 
+# Local production mirror — prod dumps land in init-db/, never commit them.
+# Keep the infra bootstrap script (00_init_databases.sql) tracked.
+docker/init-db/*.sql
+!docker/init-db/00_init_databases.sql
+
 # DB backups
 backups/
 
