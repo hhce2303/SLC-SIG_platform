@@ -110,44 +110,61 @@ docker exec SIGplatform-web python manage.py <command>
 
 ## CI/CD — Auto-deploy (GitHub Actions)
 
-Pushes to `main` deploy automatically via [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml).
-The workflow runs the same steps as *Routine Operations* but unattended: it syncs the code
-in-place, builds the image, runs a **pytest gate**, recreates the containers, restarts nginx
-only if its config changed, and health-checks the result.
+Pushes to `main` deploy automatically. There are **two targets**, each running on its own
+self-hosted Windows runner:
 
-### Why a self-hosted runner
+| Target | Runner label | Stack | Compose files |
+|---|---|---|---|
+| `local` | `local` | this PC — local production mirror | `docker-compose.yml` + `docker-compose.local.yml` |
+| `mks` | `mks` | MKS server `192.168.1.69` — production | `docker-compose.yml` |
 
-MKS (`192.168.1.69`) is on a private LAN that GitHub's cloud runners cannot reach. The workflow
-therefore runs on a **self-hosted runner installed on MKS itself**, operating directly on the
-stack at `C:\Users\jjacome\Documents\GitHub\SLC-SIG_platform` so that `.env` (gitignored) and the
-named `media_data` volume are preserved. No GitHub Secrets are required.
+Both call the reusable workflow [`.github/workflows/deploy-target.yml`](../.github/workflows/deploy-target.yml)
+from [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml), so the steps
+(sync → build → **pytest gate** → up → conditional nginx restart → health) live in one place.
 
-### One-time runner setup on MKS
+### Why self-hosted runners
+
+MKS (`192.168.1.69`) is on a private LAN that GitHub's cloud runners cannot reach, and images are
+built from source on each machine (no registry). Each runner operates directly on its own stack
+checkout so `.env` (gitignored) and the named volumes (`media_data`, `mirror_db_data`) keep their
+identity. No GitHub Secrets are required — only repository **Variables**.
+
+### Repository variables (Settings → Secrets and variables → Actions → Variables)
+
+| Variable | Purpose |
+|---|---|
+| `STACK_DIR_LOCAL` | Absolute path to the stack checkout on this PC's runner. Until set, the `local` job is skipped. |
+| `STACK_DIR_MKS` | Absolute path to the stack checkout on the MKS runner. |
+| `MKS_ENABLED` | Set to `true` **only once the MKS runner is configured**. Default: the `mks` job stays skipped (grey, not failed). |
+| `LOCAL_ENABLED` | Set to `false` to disable the `local` target. Default: on. |
+
+### One-time runner setup (per machine)
 
 1. In GitHub: **Repo → Settings → Actions → Runners → New self-hosted runner** (Windows x64).
-   Follow the download/configure commands shown there.
-2. Add the label `windows` when prompted (the workflow targets `runs-on: [self-hosted, windows]`).
-3. Install it **as a service** (`./svc.sh install` / the `Install` step of `config.cmd`) so it
-   survives reboots. The service account must:
-   - have access to Docker Desktop (be able to run `docker compose`),
-   - have read/write on `C:\Users\jjacome\Documents\GitHub\SLC-SIG_platform`,
-   - have `git` on its `PATH`.
-4. Ensure that stack directory has the production `.env` present and a clean working tree
-   (the workflow runs `git reset --hard origin/main`, discarding uncommitted local changes).
+2. When configuring (`config.cmd`), add a **unique label**: `local` for this PC, `mks` for the
+   MKS server. The defaults `self-hosted` + `windows` are added automatically.
+3. Install it **as a service** so it survives reboots. The service account must run `docker compose`,
+   have read/write on the stack directory, and have `git` on its `PATH`.
+4. Use a **dedicated deploy checkout that tracks `main`** as the stack directory (not your active
+   dev working tree) — the sync step runs `git checkout -f -B main origin/main` + `git reset --hard`,
+   which discards tracked local changes. Untracked files (`.env`, `docker/init-db/*.sql`) are kept.
+   The local mirror's `mirror_db_data` volume is shared by Compose project name `docker`, so it
+   persists across checkouts (seed it once per [LOCAL_MIRROR.md](LOCAL_MIRROR.md)).
+5. Set the matching `STACK_DIR_*` variable to that path.
 
-### What the workflow does
+### What each deploy does
 
 | Step | Action |
 |---|---|
-| Sync | `git fetch` + `git reset --hard origin/main` in-place |
+| Sync | `git fetch` + `git checkout -f -B main origin/main` + `git reset --hard` in the stack dir |
 | Detect | computes changed files to decide whether nginx needs a restart |
 | Build | `docker compose build` (does not disrupt running containers) |
-| Test gate | runs `pytest` in an ephemeral container; **aborts the deploy if tests fail** |
+| Test gate | runs `python -m pytest` (SQLite) in an ephemeral container; **aborts the deploy if tests fail** |
 | Deploy | `docker compose up -d` (migrations run via `entrypoint.sh`) |
 | nginx | `restart nginx` **only** when `docker/nginx.conf/**` changed (bind-mounted config) |
 | Health | retries `GET /api/v1/health/` on the `web` container, then prints `ps` |
 
-Trigger it manually anytime via **Actions → Deploy to MKS → Run workflow** (`workflow_dispatch`).
+Trigger manually anytime via **Actions → Deploy → Run workflow** (`workflow_dispatch`).
 
 ---
 
