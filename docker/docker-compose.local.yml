@@ -1,66 +1,86 @@
 # ─────────────────────────────────────────────────────────────
-#  SIG Platform — Local Development Stack Overlay
+#  SIG Platform — Local Production Mirror overlay
 #
-#  Extends docker-compose.yml with a pinned local MySQL instance
-#  that mirrors the production sigtools_beta database.
+#  Turns the local stack into an identical mirror of production:
+#  a single pinned MySQL 8.0.32 container hosting the three live
+#  databases (sig_dailylogs, slc_schedules, sigtools_beta) and
+#  pointing web + poller at it. Django settings stay at
+#  DJANGO_ENV=production / DEBUG=False for true parity.
 #
-#  Usage (via app.py, which wires this automatically):
-#    docker compose \
-#      -f docker/docker-compose.yml \
-#      -f docker/docker-compose.local.yml \
-#      up -d
+#  Seed the databases by dropping production dumps into
+#  docker/init-db/ (see docs/LOCAL_MIRROR.md). They import on the
+#  FIRST container start, in filename order, after
+#  00_init_databases.sql creates the DBs and the app user.
 #
-#  DO NOT use as a standalone file.
-#  DO NOT commit database volume data.
+#  Usage:
+#    docker compose -f docker/docker-compose.yml \
+#                   -f docker/docker-compose.local.yml up -d
+#
+#  DO NOT use as a standalone file. DO NOT commit DB volume data.
 # ─────────────────────────────────────────────────────────────
+
+x-mirror-db-env: &mirror-db-env
+  # Single local user with access to all three mirrored databases.
+  # Overrides the per-DB prod credentials from ../.env.
+  DB_HOST: mirror-db
+  DB_PORT: "3306"
+  DB_NAME: sig_dailylogs
+  DB_USER: ${MIRROR_DB_USER:-mirror}
+  DB_PASSWORD: ${MIRROR_DB_PASSWORD:-mirror}
+
+  SCHEDULES_DB_HOST: mirror-db
+  SCHEDULES_DB_PORT: "3306"
+  SCHEDULES_DB_NAME: slc_schedules
+  SCHEDULES_DB_USER: ${MIRROR_DB_USER:-mirror}
+  SCHEDULES_DB_PASSWORD: ${MIRROR_DB_PASSWORD:-mirror}
+
+  SIGTOOLS_DB_HOST: mirror-db
+  SIGTOOLS_DB_PORT: "3306"
+  SIGTOOLS_DB_NAME: sigtools_beta
+  SIGTOOLS_DB_USER: ${MIRROR_DB_USER:-mirror}
+  SIGTOOLS_DB_PASSWORD: ${MIRROR_DB_PASSWORD:-mirror}
+  SIGTOOLS_COOKIE_DOMAIN: "localhost"
 
 services:
 
-  # ── Local MySQL mirror for sigtools_beta ──────────────────────
-  sigtools-db:
-    image: mysql:8.0.32           # pinned — matches production version
-    container_name: SIGplatform-sigtools-db
+  # ── Local MySQL mirror — hosts all 3 production databases ─────
+  mirror-db:
+    image: mysql:8.0.32                # pinned — must match production version
+    container_name: SIGplatform-mirror-db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${LOCAL_SIGTOOLS_ROOT_PASSWORD:-localroot}
-      MYSQL_DATABASE:      ${LOCAL_SIGTOOLS_DB_NAME:-sigtools_beta}
-      MYSQL_USER:          ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
-      MYSQL_PASSWORD:      ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
+      MYSQL_ROOT_PASSWORD: ${MIRROR_DB_ROOT_PASSWORD:-rootpass}
+      MIRROR_DB_USER:      ${MIRROR_DB_USER:-mirror}
+      MIRROR_DB_PASSWORD:  ${MIRROR_DB_PASSWORD:-mirror}
     ports:
-      - "${LOCAL_SIGTOOLS_DB_PORT:-3308}:3306"   # 3308 on host → 3307 reserved for inventory_mysql
+      - "${MIRROR_DB_PORT:-3310}:3306"     # host 3310 → avoids clashing with 3306/3307/3308
     volumes:
-      - sigtools_db_data:/var/lib/mysql
-      - ./init-db:/docker-entrypoint-initdb.d:ro  # optional SQL seed scripts
+      - mirror_db_data:/var/lib/mysql
+      - ./init-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MIRROR_DB_ROOT_PASSWORD:-rootpass}"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s
+      start_period: 40s     # full dump import on first boot can take a while
 
-  # ── Override: web depends on local DB being healthy ───────────
+  # ── web points at the local mirror for all three DBs ──────────
   web:
     depends_on:
-      sigtools-db:
+      mirror-db:
         condition: service_healthy
-    environment:
-      # Point Django at the local container by service name (Docker internal DNS)
-      SIGTOOLS_COOKIE_DOMAIN: "localhost"
-      SIGTOOLS_DB_HOST: sigtools-db
-      SIGTOOLS_DB_PORT: "3306"
-      SIGTOOLS_DB_USER: ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
-      SIGTOOLS_DB_PASSWORD: ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
+      redis:
+        condition: service_healthy
+    environment: *mirror-db-env
 
-  # ── Override: poller depends on local DB being healthy ────────
+  # ── poller likewise ───────────────────────────────────────────
   poller:
     depends_on:
-      sigtools-db:
+      mirror-db:
         condition: service_healthy
-    environment:
-      SIGTOOLS_DB_HOST: sigtools-db
-      SIGTOOLS_DB_PORT: "3306"
-      SIGTOOLS_DB_USER: ${LOCAL_SIGTOOLS_DB_USER:-sigtools_user}
-      SIGTOOLS_DB_PASSWORD: ${LOCAL_SIGTOOLS_DB_PASSWORD:-sigtools_pass}
+      redis:
+        condition: service_healthy
+    environment: *mirror-db-env
 
 volumes:
-  sigtools_db_data:
+  mirror_db_data:

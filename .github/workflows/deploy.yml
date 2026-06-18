@@ -53,12 +53,14 @@ jobs:
         # Corre los tests en un contenedor efimero desde la imagen recien construida.
         # base.txt ya esta instalado en la imagen; solo faltan estos 3 wheels (puros).
         # SQLite via config.settings.test; READ_DOT_ENV=False evita leer el .env de prod.
+        # Usamos `python -m pytest` (no `pytest`): el pip install corre como el usuario
+        # no-root `django` y deja los scripts en /app/.local/bin, que NO esta en el PATH.
         # Si pytest falla, el job se detiene ANTES de tocar produccion.
         run: |
           iex "$env:COMPOSE run --rm --no-deps --entrypoint sh ``
             -e DJANGO_SETTINGS_MODULE=config.settings.test ``
             -e READ_DOT_ENV=False ``
-            web -c 'pip install --no-cache-dir pytest pytest-django factory-boy && pytest -p no:cacheprovider'"
+            web -c 'pip install --no-cache-dir --quiet pytest pytest-django factory-boy && python -m pytest -p no:cacheprovider'"
 
       - name: Deploy (recreate containers)
         # up -d recrea los contenedores cuya imagen cambio; las migraciones corren
