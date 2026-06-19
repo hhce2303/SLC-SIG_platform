@@ -2,7 +2,7 @@
 #  SIG Platform — Local Production Mirror overlay
 #
 #  Turns the local stack into an identical mirror of production:
-#  a single pinned MySQL 8.0.32 container hosting the three live
+#  a single pinned MariaDB 10.11 container hosting the three live
 #  databases (sig_dailylogs, slc_schedules, sigtools_beta) and
 #  pointing web + poller at it. Django settings stay at
 #  DJANGO_ENV=production / DEBUG=False for true parity.
@@ -45,9 +45,13 @@ services:
 
   # ── Local MySQL mirror — hosts all 3 production databases ─────
   mirror-db:
-    image: mysql:8.0.32                # pinned — must match production version
+    image: mariadb:10.11              # pinned — matches production (temporarily MariaDB 10.11; reverts to MySQL later)
     container_name: SIGplatform-mirror-db
     restart: unless-stopped
+    # Large prod dumps contain multi-MB extended INSERTs; the 16M default
+    # max_allowed_packet aborts the import ("Server has gone away"). Raise it
+    # for both the init import and runtime.
+    command: ["--max-allowed-packet=512M"]
     environment:
       MYSQL_ROOT_PASSWORD: ${MIRROR_DB_ROOT_PASSWORD:-rootpass}
       MIRROR_DB_USER:      ${MIRROR_DB_USER:-mirror}
@@ -58,11 +62,15 @@ services:
       - mirror_db_data:/var/lib/mysql
       - ./init-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MIRROR_DB_ROOT_PASSWORD:-rootpass}"]
+      # Force TCP so "healthy" means the NETWORK listener is up — during the
+      # init dump import MariaDB answers on the socket but skips networking,
+      # which would otherwise mark it healthy prematurely and let web start
+      # before the DB accepts TCP connections.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp", "-u", "root", "-p${MIRROR_DB_ROOT_PASSWORD:-rootpass}"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 40s     # full dump import on first boot can take a while
+      start_period: 600s    # full dump import (sigtools ~220MB) on first boot can take many minutes
 
   # ── web points at the local mirror for all three DBs ──────────
   web:

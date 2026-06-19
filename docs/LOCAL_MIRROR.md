@@ -9,12 +9,19 @@ producción en tiempo de ejecución.
 
 | Pieza | Producción | Espejo local |
 |---|---|---|
-| Imagen MySQL | `mysql:8.0.32` | `mysql:8.0.32` (pinned, idéntica) |
+| Motor DB | **MariaDB 10.11** (temporal; revierte a MySQL después) | `mariadb:10.11` (pinned, idéntico) |
 | DB `default` | `sig_dailylogs` @ `72.167.56.142` | `sig_dailylogs` @ contenedor `mirror-db` |
 | DB `schedules` | `slc_schedules` @ `192.168.101.135` | `slc_schedules` @ `mirror-db` |
 | DB `sigtools` | `sigtools_beta` @ `72.167.56.142` (solo lectura) | `sigtools_beta` @ `mirror-db` |
 | Settings | `production` / `DEBUG=False` | igual (paridad real) |
+| Transporte | HTTPS (cert CA real) | HTTPS (cert self-signed, ver abajo) |
 | redis / nginx / web / poller | iguales | iguales |
+
+> **Motor de DB:** producción corre **MariaDB 10.11 temporalmente** y volverá a MySQL más
+> adelante. El espejo usa `mariadb:10.11` para coincidir. ⚠️ La migración
+> `installations.0008_mariadb_uuid_and_pending_state` usa el tipo nativo `uuid` (solo
+> MariaDB 10.7+) y **fallará cuando producción vuelva a MySQL** — hay que volverla
+> condicional por vendor antes de ese cambio.
 
 > La conexión `inventory` (`Daily` @ LAN) **no se replica**: el `InventoryRouter` está
 > comentado, así que la app `inventory` usa `default`. Si algún día se activa, se añade
@@ -82,31 +89,51 @@ sed -i -E 's/DEFINER=`[^`]+`@`[^`]+`//g' docker/init-db/*.sql
 
 ---
 
-## Paso 2 — Levantar el espejo
+## Paso 2 — Certificado HTTPS (una sola vez)
+
+`production.py` fuerza cookies `Secure` + HSTS, que solo funcionan sobre HTTPS. El overlay
+[`docker/docker-compose.ssl.yml`](../docker/docker-compose.ssl.yml) hace que nginx termine
+TLS igual que producción, usando un cert self-signed en `docker/certs/`:
+
+```bash
+openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+  -keyout docker/certs/localhost.key -out docker/certs/localhost.crt \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,DNS:api.sig.systems,IP:127.0.0.1"
+# En git-bash (Windows) antepón MSYS_NO_PATHCONV=1 para que -subj no se corrompa.
+```
+
+## Paso 3 — Levantar el espejo
 
 ```bash
 # Si venías de un overlay anterior con otro volumen, límpialo primero:
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml down --remove-orphans
-docker volume rm docker_sigtools_db_data 2>/dev/null   # volumen del overlay viejo (opcional)
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml -f docker/docker-compose.ssl.yml down -v --remove-orphans
 
 # Arranque (la PRIMERA vez importa los dumps; puede tardar varios minutos)
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml up -d
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml -f docker/docker-compose.ssl.yml up -d
 ```
 
 Orden de arranque: `mirror-db` importa `00_init_databases.sql` → `10/20/30_*.sql`, queda
-`healthy`, y entonces `web` corre `entrypoint.sh` (migrate + collectstatic) **contra el
-espejo local**. Esto convierte al espejo en el lugar seguro para validar migraciones
-pendientes (p. ej. la `0008` con el `ALTER` de `notifications.id`) antes de aplicarlas en
-producción.
+`healthy` (el healthcheck usa **TCP**, así no se marca listo mientras importa), y entonces
+`web` corre `entrypoint.sh` (migrate + collectstatic) **contra el espejo local**. Esto
+convierte al espejo en el lugar seguro para validar migraciones pendientes (p. ej. la `0008`
+con el tipo `uuid` de MariaDB) antes de aplicarlas en producción.
 
-## Paso 3 — Verificar
+> El import de dumps grandes necesita `--max-allowed-packet=512M` (ya en el overlay) o aborta
+> con *"Server has gone away"*. El primer arranque puede tardar varios minutos; `web` espera
+> al healthcheck TCP de `mirror-db`.
+
+## Paso 4 — Verificar
 
 ```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml ps
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml exec -T web curl -fsS http://localhost:8000/api/v1/health/
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml -f docker/docker-compose.ssl.yml ps
+
+# Health sobre HTTPS (cert self-signed → -k) y redirect HTTP→HTTPS (301)
+curl -sk https://localhost/api/v1/health/
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost/api/v1/health/
 
 # Confirmar que las 3 DBs tienen tablas/datos
-docker exec SIGplatform-mirror-db sh -c 'mysql -u root -prootpass -e "SELECT table_schema, COUNT(*) tables FROM information_schema.tables WHERE table_schema IN (\"sig_dailylogs\",\"slc_schedules\",\"sigtools_beta\") GROUP BY table_schema;"'
+docker exec SIGplatform-mirror-db sh -c 'mariadb -u root -prootpass -e "SELECT table_schema, COUNT(*) tables FROM information_schema.tables WHERE table_schema IN (\"sig_dailylogs\",\"slc_schedules\",\"sigtools_beta\") GROUP BY table_schema;"'
 ```
 
 ## Re-sembrar (refrescar datos desde prod)
@@ -114,9 +141,9 @@ docker exec SIGplatform-mirror-db sh -c 'mysql -u root -prootpass -e "SELECT tab
 Los dumps solo importan en volumen vacío. Para refrescar:
 
 ```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml down -v   # borra el volumen mirror_db_data
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml -f docker/docker-compose.ssl.yml down -v   # borra el volumen mirror_db_data
 # (regenera los dumps del Paso 1 si quieres datos más nuevos)
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml up -d
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.local.yml -f docker/docker-compose.ssl.yml up -d
 ```
 
 ## Notas
