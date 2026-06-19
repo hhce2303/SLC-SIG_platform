@@ -32,6 +32,7 @@ jobs:
       runner_label: local
       stack_dir: ${{ vars.STACK_DIR_LOCAL }}
       compose_files: -f docker/docker-compose.yml -f docker/docker-compose.local.yml -f docker/docker-compose.ssl.yml
+      https: true
 
   mks:
     # Stays skipped until you configure the MKS runner and set MKS_ENABLED=true.
