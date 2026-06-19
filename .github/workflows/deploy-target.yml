@@ -22,6 +22,11 @@ on:
         description: "docker compose -f flags for this target"
         required: true
         type: string
+      https:
+        description: "Target serves HTTPS with a self-signed cert (local mirror). Auto-generates the cert if missing and verifies HTTPS in the health check."
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: deploy-${{ inputs.runner_label }}
@@ -54,6 +59,23 @@ jobs:
           $nginx = [bool]($changed | Select-String -Pattern '^docker/nginx\.conf/')
           "NGINX_CHANGED=$nginx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
+      - name: Ensure TLS cert (self-signed, HTTPS targets only)
+        # The ssl overlay needs docker/certs/localhost.{crt,key}, which are
+        # gitignored — a fresh checkout has none, so nginx would crash-loop on
+        # "cannot load certificate". Generate one if missing, using openssl in a
+        # throwaway container (Docker is already required; no host openssl needed).
+        if: ${{ inputs.https }}
+        run: |
+          $certDir = Join-Path (Get-Location) 'docker\certs'
+          New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+          if (Test-Path (Join-Path $certDir 'localhost.crt')) {
+            Write-Host "TLS cert already present — skipping"
+          } else {
+            Write-Host "No TLS cert — generating self-signed cert for the local mirror"
+            docker run --rm -v "${certDir}:/certs" alpine/openssl req -x509 -nodes -newkey rsa:2048 -days 825 -keyout /certs/localhost.key -out /certs/localhost.crt -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,DNS:api.sig.systems,IP:127.0.0.1"
+            if ($LASTEXITCODE -ne 0) { throw "self-signed cert generation failed" }
+          }
+
       - name: Build image
         run: docker compose ${{ inputs.compose_files }} build
 
@@ -70,14 +92,32 @@ jobs:
         if: env.NGINX_CHANGED == 'True'
         run: docker compose ${{ inputs.compose_files }} restart nginx
 
-      - name: Health check
+      - name: Health check (web container)
         run: |
           $ok = $false
           foreach ($i in 1..10) {
             docker compose ${{ inputs.compose_files }} exec -T web curl -fsS http://localhost:8000/api/v1/health/
             if ($LASTEXITCODE -eq 0) { $ok = $true; break }
-            Write-Host "Health check attempt $i failed; retrying in 6s..."
+            Write-Host "web health attempt $i failed; retrying in 6s..."
             Start-Sleep -Seconds 6
           }
           docker compose ${{ inputs.compose_files }} ps
-          if (-not $ok) { throw 'Health check failed after 10 attempts' }
+          if (-not $ok) { throw 'web health check failed after 10 attempts' }
+
+      - name: Verify HTTPS through nginx (HTTPS targets only)
+        # The web check above hits gunicorn directly, so a broken nginx/TLS would
+        # still pass green (this is exactly how a missing-cert crash-loop slipped
+        # through once). Verify the full TLS path nginx -> web from the host.
+        if: ${{ inputs.https }}
+        run: |
+          $ok = $false
+          foreach ($i in 1..10) {
+            $code = (curl.exe -sk -o NUL -w "%{http_code}" https://localhost/api/v1/health/)
+            if ($code -eq '200') { Write-Host "HTTPS OK ($code)"; $ok = $true; break }
+            Write-Host "HTTPS attempt $i got '$code'; retrying in 6s..."
+            Start-Sleep -Seconds 6
+          }
+          if (-not $ok) {
+            docker compose ${{ inputs.compose_files }} logs --tail 30 nginx
+            throw 'HTTPS health check via nginx failed'
+          }
