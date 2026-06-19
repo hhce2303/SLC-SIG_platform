@@ -1,0 +1,2 @@
+# Keeps docker/certs/ in git. The actual cert/key (localhost.crt/.key) are
+# generated locally per-dev and gitignored. See docs/LOCAL_MIRROR.md.

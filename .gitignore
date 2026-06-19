@@ -58,6 +58,11 @@ sigtools_beta.sql
 docker/init-db/*.sql
 !docker/init-db/00_init_databases.sql
 
+# Self-signed certs for the local HTTPS mirror — never commit private keys.
+# Each dev generates their own (see docs/LOCAL_MIRROR.md).
+docker/certs/*
+!docker/certs/.gitkeep
+
 # DB backups
 backups/
 
