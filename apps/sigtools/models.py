@@ -307,6 +307,14 @@ class CameraModel(_SigtoolsBase):
     created_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(null=True, blank=True)
 
+    # Factory specs — see docs/db/camera_models_schema.md. Added manually via
+    # add_camera_spec_columns (not a Django migration, sigtools is unmanaged).
+    rango_lente_mm = models.JSONField(null=True, blank=True)
+    rango_fov_grados = models.JSONField(null=True, blank=True)
+    lens_type = models.CharField(max_length=20, null=True, blank=True)
+    poe_watts = models.FloatField(null=True, blank=True)
+    bandwidth_mbps = models.FloatField(null=True, blank=True)
+
     class Meta(_SigtoolsBase.Meta):
         db_table = "camera_models"
 

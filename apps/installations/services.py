@@ -1419,6 +1419,8 @@ def export_inventory_from_canvas(payload: dict, installation_id: int | None = No
     for device_id in created_device_ids:
         _publish_device_event("site_device_updated", site_id, device_id)
 
+    cu.invalidate(f"inst:catalog:site_camera_models:{site_id}")
+
     return {
         "success": True,
         "site_id": site_id,
@@ -1807,6 +1809,7 @@ def sync_installation(inst_id: int, payload: dict) -> dict[str, int]:
                 # pero dejar rastro para diagnóstico.
                 logger.warning("sync_installation: no se pudo actualizar visual_metadata (inst=%s): %s", inst_id, exc)
 
+    cu.invalidate(f"inst:catalog:site_camera_models:{site_id}")
     return id_mapping
 
 

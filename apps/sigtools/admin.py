@@ -16,8 +16,10 @@ from django.db.models import QuerySet
 from django.http import HttpRequest, HttpResponse
 from django.utils.html import format_html
 
+from apps.core import cache_utils as cu
 from apps.sigtools.models import (
     Camera,
+    CameraModel,
     Device,
     Event,
     Installation,
@@ -237,6 +239,46 @@ class CameraAdmin(ReadOnlyAdminMixin, ModelAdmin):
         return _export_csv(queryset, fields, "sigtools_cameras.csv")
 
     actions = ["export_csv"]
+
+
+# ---------------------------------------------------------------------------
+# Camera models — factory specs
+# ---------------------------------------------------------------------------
+
+@admin.register(CameraModel, site=sigtools_admin)
+class CameraModelAdmin(ModelAdmin):
+    """
+    Intentional exception to ReadOnlyAdminMixin: camera_models is otherwise a
+    read-only mirror of sigtools_beta, but rango_lente_mm/rango_fov_grados/
+    lens_type/poe_watts/bandwidth_mbps are factory-spec columns this project
+    owns (see docs/db/camera_models_schema.md) and edits here on purpose.
+    Identity fields (name, type, brand, timestamps) stay readonly.
+    """
+
+    list_display = (
+        "id", "name", "camera_brand", "camera_type",
+        "rango_lente_mm", "rango_fov_grados", "lens_type",
+    )
+    search_fields = ("name",)
+    list_filter = ("camera_brand", "camera_type", "lens_type")
+    ordering = ("camera_type", "camera_brand", "name")
+    list_per_page = 50
+    readonly_fields = ("id", "camera_type", "camera_brand", "name", "created_at", "updated_at")
+    fields = (
+        "id", "camera_type", "camera_brand", "name",
+        "rango_lente_mm", "rango_fov_grados", "lens_type", "poe_watts", "bandwidth_mbps",
+        "created_at", "updated_at",
+    )
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
+        return False
+
+    def save_model(self, request: HttpRequest, obj: CameraModel, form, change: bool) -> None:
+        super().save_model(request, obj, form, change)
+        cu.invalidate("inst:catalog:camera_model_catalog:v3")
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,24 @@ logger = logging.getLogger(__name__)
 
 _DB = "sigtools"
 
+
+def _parse_json_range(value: Any) -> list[float] | None:
+    """
+    camera_models.rango_lente_mm / rango_fov_grados are JSON columns holding
+    [min, max]. Raw cursors return JSON columns as text, not as parsed Python
+    objects — normalize both cases here. None/empty stays None so
+    enrich_camera_item falls back to the DEFAULT_CAM_SPECS default.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Catalog
 # ---------------------------------------------------------------------------
@@ -666,17 +684,22 @@ def get_camera_model_catalog() -> list[dict]:
     reuse the same TypeScript interface. serial and ip are always None
     because these are model definitions, not physical units.
     """
-    return cu.cached("inst:catalog:camera_model_catalog:v2", _compute_camera_model_catalog, cu.TTL_CATALOG)
+    return cu.cached("inst:catalog:camera_model_catalog:v3", _compute_camera_model_catalog, cu.TTL_CATALOG)
 
 
 def _compute_camera_model_catalog() -> list[dict]:
     sql = """
         SELECT
-            cm.id          AS model_id,
-            cm.name        AS name,
-            cb.Name        AS brand,
-            ct.name        AS subtype,
-            ct.description AS type_desc
+            cm.id               AS model_id,
+            cm.name             AS name,
+            cb.Name             AS brand,
+            ct.name             AS subtype,
+            ct.description      AS type_desc,
+            cm.rango_lente_mm   AS rango_lente_mm,
+            cm.rango_fov_grados AS rango_fov_grados,
+            cm.lens_type        AS lens_type,
+            cm.poe_watts        AS poe_watts,
+            cm.bandwidth_mbps   AS bandwidth_mbps
         FROM camera_models cm
         JOIN camera_brands cb ON cm.camera_brand_id = cb.id
         JOIN camera_types  ct ON cm.camera_type_id  = ct.id
@@ -699,6 +722,11 @@ def _compute_camera_model_catalog() -> list[dict]:
             "category": "camera",
             "subtype": (row["subtype"] or "").lower(),
             "isExistingInventory": False,
+            "rango_lente_mm": _parse_json_range(row["rango_lente_mm"]),
+            "rango_fov_grados": _parse_json_range(row["rango_fov_grados"]),
+            "lens_type": row["lens_type"],
+            "poe_watts": row["poe_watts"],
+            "bandwidth_mbps": row["bandwidth_mbps"],
         })
         for row in rows
     ]
@@ -708,18 +736,32 @@ def get_site_camera_models(site_id: int) -> list[dict]:
     """
     Returns one entry per individual camera installed at a given site.
     Each camera is identified by its own DB id and serial number.
-    Fields with no DB column are returned as None so the frontend schema
-    stays intact.
+    Lens/FOV/PoE/bandwidth come from camera_models' factory spec columns
+    (see docs/db/camera_models_schema.md); null until populated for that
+    model, in which case enrich_camera_item falls back to DEFAULT_CAM_SPECS.
     """
+    return cu.cached(
+        f"inst:catalog:site_camera_models:{int(site_id)}",
+        lambda: _compute_site_camera_models(site_id),
+        cu.TTL_CATALOG,
+    )
+
+
+def _compute_site_camera_models(site_id: int) -> list[dict]:
     sql = """
         SELECT
-            c.id           AS camera_id,
-            c.serial       AS serial,
-            cm.name        AS name,
-            cb.Name        AS brand,
-            ct.name        AS subtype,
-            ct.description AS type_desc,
-            d.address      AS ip
+            c.id                AS camera_id,
+            c.serial            AS serial,
+            cm.name             AS name,
+            cb.Name             AS brand,
+            ct.name             AS subtype,
+            ct.description      AS type_desc,
+            d.address           AS ip,
+            cm.rango_lente_mm   AS rango_lente_mm,
+            cm.rango_fov_grados AS rango_fov_grados,
+            cm.lens_type        AS lens_type,
+            cm.poe_watts        AS poe_watts,
+            cm.bandwidth_mbps   AS bandwidth_mbps
         FROM cameras c
         JOIN camera_models cm  ON c.camera_model_id = cm.id
         JOIN camera_brands cb  ON cm.camera_brand_id = cb.id
@@ -737,7 +779,7 @@ def get_site_camera_models(site_id: int) -> list[dict]:
         rows = [dict(zip(cols, row)) for row in cur.fetchall()]
 
     return [
-        {
+        enrich_camera_item({
             "id": f"cam-{row['camera_id']}",
             "name": row["name"],
             "brand": (row["brand"] or "").upper(),
@@ -747,12 +789,13 @@ def get_site_camera_models(site_id: int) -> list[dict]:
             "type": row["type_desc"],
             "category": "camera",
             "subtype": (row["subtype"] or "").lower(),
-            "lensType": None,
-            "rango_lente_mm": None,
-            "rango_fov_grados": None,
-            "poe_watts": None,
-            "bandwidth_mbps": None,
-        }
+            "lensType": row["lens_type"],
+            "rango_lente_mm": _parse_json_range(row["rango_lente_mm"]),
+            "rango_fov_grados": _parse_json_range(row["rango_fov_grados"]),
+            "poe_watts": row["poe_watts"],
+            "bandwidth_mbps": row["bandwidth_mbps"],
+            "isExistingInventory": True,
+        })
         for row in rows
     ]
 
@@ -1018,14 +1061,19 @@ def _enrich_catalog_serials(catalog: list[dict]) -> list[dict]:
 def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
     sql = """
         SELECT
-            c.id           AS camera_id,
-            c.serial       AS serial,
-            cm.name        AS name,
-            cb.Name        AS brand,
-            ct.name        AS subtype,
-            ct.description AS type_desc,
-            d.address      AS ip,
-            v.View_name    AS view_name
+            c.id                AS camera_id,
+            c.serial            AS serial,
+            cm.name             AS name,
+            cb.Name             AS brand,
+            ct.name             AS subtype,
+            ct.description      AS type_desc,
+            d.address           AS ip,
+            v.View_name         AS view_name,
+            cm.rango_lente_mm   AS rango_lente_mm,
+            cm.rango_fov_grados AS rango_fov_grados,
+            cm.lens_type        AS lens_type,
+            cm.poe_watts        AS poe_watts,
+            cm.bandwidth_mbps   AS bandwidth_mbps
         FROM cameras c
         JOIN camera_models cm  ON c.camera_model_id = cm.id
         JOIN camera_brands cb  ON cm.camera_brand_id = cb.id
@@ -1054,11 +1102,11 @@ def _get_site_cameras_for_catalog(site_id: int) -> list[dict]:
             "type": row["type_desc"] or None,
             "category": "camera",
             "subtype": (row["subtype"] or "").lower(),
-            "lensType": None,
-            "rango_lente_mm": None,
-            "rango_fov_grados": None,
-            "poe_watts": None,
-            "bandwidth_mbps": None,
+            "lensType": row["lens_type"],
+            "rango_lente_mm": _parse_json_range(row["rango_lente_mm"]),
+            "rango_fov_grados": _parse_json_range(row["rango_fov_grados"]),
+            "poe_watts": row["poe_watts"],
+            "bandwidth_mbps": row["bandwidth_mbps"],
             "poe_budget_watts": None,
             "uplink_mbps": None,
             "view_name": row["view_name"] or None,

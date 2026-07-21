@@ -47,11 +47,11 @@ No requiere parámetros.
     "type": null,
     "category": "camera",
     "subtype": "bullet",
-    "lensType": null,
-    "rango_lente_mm": null,
-    "rango_fov_grados": null,
-    "poe_watts": null,
-    "bandwidth_mbps": null
+    "lensType": "varifocal",
+    "rango_lente_mm": [2.8, 12],
+    "rango_fov_grados": [104, 29],
+    "poe_watts": 8,
+    "bandwidth_mbps": 5
   },
   {
     "id": "cam-1",
@@ -63,14 +63,18 @@ No requiere parámetros.
     "type": null,
     "category": "camera",
     "subtype": "bullet",
-    "lensType": null,
-    "rango_lente_mm": null,
-    "rango_fov_grados": null,
-    "poe_watts": null,
-    "bandwidth_mbps": null
+    "lensType": "varifocal",
+    "rango_lente_mm": [3.6, 3.6],
+    "rango_fov_grados": [88, 88],
+    "poe_watts": 8,
+    "bandwidth_mbps": 5
   }
 ]
 ```
+
+> Nota: `lensType`/`rango_lente_mm`/`rango_fov_grados`/`poe_watts`/`bandwidth_mbps` en `"DS-2CD2T47G2-L"`
+> son ilustrativos de un spec de fábrica ya cargado (via admin); un modelo sin spec cargado muestra el
+> default genérico del *subtype* (como en `"IP2M-853E"` arriba).
 
 - Actualmente retorna **218 modelos**.
 - Ordenados por `subtype → brand → name`.
@@ -91,15 +95,19 @@ export interface CameraModel {
   type: string | null     // Descripción del tipo. Ej: "Exterior Bullet Camera"
   category: 'camera'      // Siempre "camera"
   subtype: string         // Tipo en minúsculas. Ver tabla de subtypes abajo.
-  lensType: null          // Pendiente de columna en DB
-  rango_lente_mm: null    // Pendiente de columna en DB
-  rango_fov_grados: null  // Pendiente de columna en DB
-  poe_watts: null         // Pendiente de columna en DB
-  bandwidth_mbps: null    // Pendiente de columna en DB
+  lensType: string | null          // fixed | varifocal | hybrid. null si el modelo no tiene spec cargado
+  rango_lente_mm: [number, number] | null   // [min, max] mm. null si el modelo no tiene spec cargado
+  rango_fov_grados: [number, number] | null // [min, max] grados. null si el modelo no tiene spec cargado
+  poe_watts: number | null         // null si el modelo no tiene spec cargado
+  bandwidth_mbps: number | null    // null si el modelo no tiene spec cargado
 }
 ```
 
-> Los campos `null` fijos se poblarán cuando se agreguen las columnas en `camera_models`. **El schema no cambiará** — solo dejarán de ser `null`.
+> `lensType`, `rango_lente_mm`, `rango_fov_grados`, `poe_watts` y `bandwidth_mbps` ahora vienen de columnas
+> reales en `camera_models` (ver `docs/db/camera_models_schema.md`), cargadas manualmente vía el admin de
+> Django. Si el modelo tiene su spec de fábrica cargado, estos campos devuelven ese valor real; si no,
+> devuelven el mismo default genérico por *subtype* que este endpoint ya devolvía antes (nunca `null` en la
+> práctica — el ejemplo de arriba con `null` quedó desactualizado). El shape no cambió.
 
 ---
 

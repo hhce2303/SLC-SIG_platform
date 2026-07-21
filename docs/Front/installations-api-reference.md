@@ -354,11 +354,11 @@ Una misma unidad de equipo = una entrada en la lista.
     "type": "Exterior bullet",
     "category": "camera",
     "subtype": "bullet",
-    "lensType": null,
-    "rango_lente_mm": null,
-    "rango_fov_grados": null,
-    "poe_watts": null,
-    "bandwidth_mbps": null
+    "lensType": "varifocal",
+    "rango_lente_mm": [2.8, 12],
+    "rango_fov_grados": [104, 29],
+    "poe_watts": 8,
+    "bandwidth_mbps": 5
   }
 ]
 ```
@@ -373,11 +373,15 @@ Una misma unidad de equipo = una entrada en la lista.
 | `type` | `string \| null` | Descripción del tipo de cámara |
 | `category` | `"camera"` | Siempre `"camera"` |
 | `subtype` | `string` | Tipo en minúsculas: `"bullet"`, `"dome"`, `"ptz"`, … |
-| `lensType` | `null` | No disponible en DB actualmente |
-| `rango_lente_mm` | `null` | No disponible en DB actualmente |
-| `rango_fov_grados` | `null` | No disponible en DB actualmente |
-| `poe_watts` | `null` | No disponible en DB actualmente |
-| `bandwidth_mbps` | `null` | No disponible en DB actualmente |
+| `lensType` | `string \| null` | `fixed`\|`varifocal`\|`hybrid` — real si el modelo tiene spec de fábrica cargado (admin), si no el default por *subtype* |
+| `rango_lente_mm` | `[number, number] \| null` | `[min, max]` mm — real o default por *subtype* |
+| `rango_fov_grados` | `[number, number] \| null` | `[min, max]` grados — real o default por *subtype* |
+| `poe_watts` | `number \| null` | Real o default por *subtype* |
+| `bandwidth_mbps` | `number \| null` | Real o default por *subtype* |
+
+> Estos 5 campos vienen ahora de columnas reales en `camera_models` (ver
+> `docs/db/camera_models_schema.md`). Antes este endpoint los devolvía siempre en `null`; ahora cae al
+> default genérico por *subtype* mientras el modelo no tenga spec de fábrica cargado.
 
 Sitio sin cámaras → `[]` con status `200`.
 

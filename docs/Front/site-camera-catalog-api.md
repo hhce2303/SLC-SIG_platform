@@ -49,11 +49,11 @@ Reemplaza los dos endpoints anteriores (`/catalog/` solo cámaras y `/catalog/sw
     "type": null,
     "category": "camera",
     "subtype": "bullet",
-    "lensType": null,
-    "rango_lente_mm": null,
-    "rango_fov_grados": null,
-    "poe_watts": null,
-    "bandwidth_mbps": null,
+    "lensType": "varifocal",
+    "rango_lente_mm": [2.8, 12],
+    "rango_fov_grados": [104, 29],
+    "poe_watts": 8,
+    "bandwidth_mbps": 5,
     "poe_budget_watts": null,
     "uplink_mbps": null
   },
@@ -149,15 +149,21 @@ Sitio sin dispositivos → `[]` con status `200`.
 | `type` | `string | null` | Para cámaras: `camera_types.description`. Para otros: `null` |
 | `category` | `string` | Agrupación lógica: `"camera"`, `"network"`, `"power"`, `"video"`, `"wireless"`, `"security"` |
 | `subtype` | `string` | Tipo específico: `"bullet"`, `"dome"`, `"ptz"`, `"switch"`, `"router"`, `"pdu"`, `"da"`, `"radio"`, `"access_control"` |
-| `lensType` | `null` | Reservado. Siempre `null` |
-| `rango_lente_mm` | `null` | Reservado. Siempre `null` |
-| `rango_fov_grados` | `null` | Reservado. Siempre `null` |
-| `poe_watts` | `null` | Reservado. Siempre `null` |
-| `bandwidth_mbps` | `null` | Reservado. Siempre `null` |
-| `poe_budget_watts` | `null` | Reservado. Siempre `null` |
-| `uplink_mbps` | `null` | Reservado. Siempre `null` |
+| `lensType` | `string \| null` | Solo cámaras: `fixed`\|`varifocal`\|`hybrid`, real (si se cargó el spec de fábrica en el admin) o default por *subtype*. `null` para dispositivos que no son cámara |
+| `rango_lente_mm` | `[number, number] \| null` | Solo cámaras: `[min, max]` mm, real o default por *subtype*. `null` para no-cámaras |
+| `rango_fov_grados` | `[number, number] \| null` | Solo cámaras: `[min, max]` grados, real o default por *subtype*. `null` para no-cámaras |
+| `poe_watts` | `number \| null` | Solo cámaras: real o default por *subtype*. `null` para no-cámaras |
+| `bandwidth_mbps` | `number \| null` | Solo cámaras: real o default por *subtype*. `null` para no-cámaras |
+| `poe_budget_watts` | `null` | Reservado (dispositivos de red). Siempre `null` por ahora |
+| `uplink_mbps` | `null` | Reservado (dispositivos de red). Siempre `null` por ahora |
 
-> Los campos `null` reservados serán poblados cuando se agreguen las columnas correspondientes en la DB. El schema **no cambiará**, solo dejarán de ser `null`.
+> `lensType`/`rango_lente_mm`/`rango_fov_grados`/`poe_watts`/`bandwidth_mbps` ahora vienen de columnas reales
+> en `camera_models` (ver `docs/db/camera_models_schema.md`), cargadas manualmente vía el admin de Django.
+> Si el modelo de la cámara instalada tiene su spec de fábrica cargado, se devuelve ese valor; si no, el
+> mismo default genérico por *subtype* que ya se devolvía antes para el catálogo general. Antes este
+> endpoint (`/sites/<id>/catalog/`) sí devolvía estos campos siempre en `null` para cámaras — eso cambió.
+> `poe_budget_watts`/`uplink_mbps` siguen reservados (son specs de dispositivos de red, no de cámaras). El
+> shape no cambió.
 
 ---
 
