@@ -51,12 +51,17 @@ def _parse_json_range(value: Any) -> list[float] | None:
 # Catalog
 # ---------------------------------------------------------------------------
 
+# Exported so other apps invalidate this exact key on writes to camera_models
+# instead of duplicating the string literal (mirrors CAMERA_MODEL_CATALOG_CACHE_KEY).
+CAMERA_CATALOG_CACHE_KEY = "inst:catalog:camera_catalog"
+
+
 def get_camera_catalog() -> list[dict]:
     """
     Hierarchical camera catalog: Type → Brand → [Model].
     Uses raw SQL for the three-table join; returns a nested Python structure.
     """
-    return cu.cached("inst:catalog:camera_catalog", _compute_camera_catalog, cu.TTL_CATALOG)
+    return cu.cached(CAMERA_CATALOG_CACHE_KEY, _compute_camera_catalog, cu.TTL_CATALOG)
 
 
 def _compute_camera_catalog() -> list[dict]:
@@ -65,7 +70,9 @@ def _compute_camera_catalog() -> list[dict]:
             ct.id   AS type_id,  ct.name AS type_name,
             ct.description,      ct.lens_amount,
             cb.id   AS brand_id, cb.Name AS brand_name,
-            cm.id   AS model_id, cm.name AS model_name
+            cm.id   AS model_id, cm.name AS model_name,
+            cm.rango_lente_mm   AS rango_lente_mm,
+            cm.rango_fov_grados AS rango_fov_grados
         FROM camera_types ct
         JOIN camera_models cm ON ct.id = cm.camera_type_id
         JOIN camera_brands cb ON cm.camera_brand_id = cb.id
@@ -94,9 +101,14 @@ def _compute_camera_catalog() -> list[dict]:
                 "name": row["brand_name"],
                 "models": [],
             }
-        types[t_id]["brands"][b_id]["models"].append(
-            {"id": row["model_id"], "name": row["model_name"]}
-        )
+        types[t_id]["brands"][b_id]["models"].append({
+            "id": row["model_id"],
+            "name": row["model_name"],
+            # Raw passthrough — null means "no spec saved yet", distinct from
+            # the subtype-default fallback used elsewhere (enrich_camera_item).
+            "rango_lente_mm": _parse_json_range(row["rango_lente_mm"]),
+            "rango_fov_grados": _parse_json_range(row["rango_fov_grados"]),
+        })
 
     result = []
     for t in types.values():
@@ -674,6 +686,11 @@ def get_site_detail(site_id: int) -> dict | None:
     }
 
 
+# Exported so other apps (e.g. apps.inventory) invalidate this exact key on
+# writes to camera_models instead of duplicating the string literal.
+CAMERA_MODEL_CATALOG_CACHE_KEY = "inst:catalog:camera_model_catalog:v3"
+
+
 def get_camera_model_catalog() -> list[dict]:
     """
     Flat list of every camera model registered in the company catalog.
@@ -684,7 +701,7 @@ def get_camera_model_catalog() -> list[dict]:
     reuse the same TypeScript interface. serial and ip are always None
     because these are model definitions, not physical units.
     """
-    return cu.cached("inst:catalog:camera_model_catalog:v3", _compute_camera_model_catalog, cu.TTL_CATALOG)
+    return cu.cached(CAMERA_MODEL_CATALOG_CACHE_KEY, _compute_camera_model_catalog, cu.TTL_CATALOG)
 
 
 def _compute_camera_model_catalog() -> list[dict]:

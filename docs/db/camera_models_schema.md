@@ -43,12 +43,26 @@ completados).
 
 - **Admin Django**: `CameraModelAdmin` en `apps/sigtools/admin.py` — única excepción al patrón
   `ReadOnlyAdminMixin` de ese admin site, habilitada solo para estos 5 campos.
+- **API**: `POST /api/v1/inventory/camera-specs/` (`apps/inventory/views.py::CameraSpecUpdateView` →
+  `apps/inventory/services.py::update_camera_spec()`) — solo escribe `rango_lente_mm`/`rango_fov_grados`
+  (`lens_type`/`poe_watts`/`bandwidth_mbps` quedan fuera de esta ruta, ver
+  `apps/inventory/serializers.py::CameraSpecWriteSerializer`). Primer cruce de `apps.inventory` hacia
+  `apps.sigtools`; el ruteo de DB lo resuelve `SigtoolsRouter` sin cambios adicionales. Cada escritura por
+  esta ruta queda registrada en `apps.inventory.models.CameraSpecChangeLog` (`camera_model_id`,
+  `rango_lente_mm`, `rango_fov_grados`, `changed_by_id`, `changed_at`) — tabla propia en `default`, sin
+  relación con `LogEntry` de Django que usa el path del admin.
 - **Lectura**: `apps/installations/selectors.py` — `_compute_camera_model_catalog()`,
-  `get_site_camera_models()`, `get_site_switch_models()`.
-- **Caché**: ver `apps/core/cache_utils.py` — catálogo general cacheado bajo
-  `"inst:catalog:camera_model_catalog:v3"` (`TTL_CATALOG` = 600s); catálogos por sitio bajo
-  `f"inst:catalog:site_camera_models:{site_id}"`. Ambas keys se invalidan al guardar un spec desde el admin
-  o al insertar/eliminar cámaras de un sitio (ver `apps/installations/services.py`).
+  `_compute_camera_catalog()` (árbol jerárquico Tipo→Marca→Modelo, `GET /catalog/cameras/` — devuelve el
+  valor **crudo**, `null` si no hay spec guardado, sin el fallback por *subtype* que sí aplica
+  `_compute_camera_model_catalog()`), `get_site_camera_models()`, `get_site_switch_models()`.
+- **Caché**: ver `apps/core/cache_utils.py` — dos catálogos cacheados por constante (`TTL_CATALOG` = 600s):
+  `apps.installations.selectors.CAMERA_MODEL_CATALOG_CACHE_KEY`
+  (`"inst:catalog:camera_model_catalog:v3"`, catálogo plano) y
+  `apps.installations.selectors.CAMERA_CATALOG_CACHE_KEY` (`"inst:catalog:camera_catalog"`, árbol
+  jerárquico). Catálogos por sitio bajo `f"inst:catalog:site_camera_models:{site_id}"`. Ambas rutas de
+  escritura (admin y API de inventory) invalidan las **dos** cache keys de catálogo; ninguna invalida las de
+  por-sitio (se autoexpiran en 600s) — mismo comportamiento al insertar/eliminar cámaras de un sitio (ver
+  `apps/installations/services.py`).
 
 ## Import masivo (futuro)
 

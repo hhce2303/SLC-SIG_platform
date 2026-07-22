@@ -78,8 +78,8 @@ Retorna la estructura jerárquica de cámaras: **Tipo → Marca → [Modelos]**.
         "id": 3,
         "name": "HIKVISION",
         "models": [
-          { "id": 12, "name": "DS-2CD2143G2-I" },
-          { "id": 14, "name": "DS-2CD2347G2-LU" }
+          { "id": 12, "name": "DS-2CD2143G2-I", "rango_lente_mm": [2.8, 12], "rango_fov_grados": [104, 29] },
+          { "id": 14, "name": "DS-2CD2347G2-LU", "rango_lente_mm": null, "rango_fov_grados": null }
         ]
       }
     ]
@@ -97,6 +97,8 @@ Retorna la estructura jerárquica de cámaras: **Tipo → Marca → [Modelos]**.
 | `brands[].name` | `string` | Nombre de la marca en mayúsculas |
 | `brands[].models[].id` | `number` | ID del modelo |
 | `brands[].models[].name` | `string` | Nombre del modelo |
+| `brands[].models[].rango_lente_mm` | `[number, number] \| null` | `[min, max]` mm de fábrica. `null` si el modelo no tiene spec guardado (ver `docs/db/camera_models_schema.md`) — **valor crudo, sin default por subtype** |
+| `brands[].models[].rango_fov_grados` | `[number, number] \| null` | `[min, max]` grados de fábrica. Mismo comportamiento `null` que arriba |
 
 ---
 

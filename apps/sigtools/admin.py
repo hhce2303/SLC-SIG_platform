@@ -278,7 +278,8 @@ class CameraModelAdmin(ModelAdmin):
 
     def save_model(self, request: HttpRequest, obj: CameraModel, form, change: bool) -> None:
         super().save_model(request, obj, form, change)
-        cu.invalidate("inst:catalog:camera_model_catalog:v3")
+        from apps.installations.selectors import CAMERA_CATALOG_CACHE_KEY, CAMERA_MODEL_CATALOG_CACHE_KEY
+        cu.invalidate(CAMERA_MODEL_CATALOG_CACHE_KEY, CAMERA_CATALOG_CACHE_KEY)
 
 
 # ---------------------------------------------------------------------------

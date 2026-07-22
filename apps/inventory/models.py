@@ -297,3 +297,27 @@ class ElevatorRental(models.Model):
 
     def __str__(self) -> str:
         return f"ElevatorRental site={self.site_id}"
+
+
+# ── Camera Spec Change Log ────────────────────────────────────────────────────
+
+class CameraSpecChangeLog(models.Model):
+    """
+    Audit trail for factory lens/FOV specs pushed onto sigtools_beta's
+    camera_models via POST /camera-specs/. camera_model_id references
+    apps.sigtools.models.CameraModel (a different database), not a local FK.
+    """
+
+    camera_model_id  = models.PositiveIntegerField(db_index=True)
+    rango_lente_mm   = models.JSONField()
+    rango_fov_grados = models.JSONField()
+    changed_by_id    = models.BigIntegerField()
+    changed_at       = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "inv_camera_spec_change_log"
+        ordering = ["-changed_at"]
+        indexes = [models.Index(fields=["camera_model_id"], name="inv_camspec_model_idx")]
+
+    def __str__(self) -> str:
+        return f"CameraSpecChangeLog camera_model_id={self.camera_model_id}"

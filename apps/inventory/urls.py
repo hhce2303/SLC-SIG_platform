@@ -4,6 +4,7 @@ from apps.inventory.views import (
     ActivityLogListCreateView,
     ArticleDetailView,
     ArticleListCreateView,
+    CameraSpecUpdateView,
     CamerasBySiteView,
     DashboardStatsView,
     GroupListView,
@@ -51,4 +52,6 @@ urlpatterns = [
     path("sites/<int:site_id>/operations-assignment/", OperationsAssignmentView.as_view(), name="inventory-operations-assignment"),
     # Elevator Rental (singleton)
     path("sites/<int:site_id>/elevator-rental/", ElevatorRentalView.as_view(), name="inventory-elevator-rental"),
+    # Camera Spec (writes into sigtools_beta.camera_models)
+    path("camera-specs/", CameraSpecUpdateView.as_view(), name="inventory-camera-specs"),
 ]

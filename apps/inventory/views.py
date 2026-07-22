@@ -16,6 +16,8 @@ from apps.inventory.serializers import (
     ArticleReadSerializer,
     ArticleUpdateSerializer,
     ArticleWriteSerializer,
+    CameraSpecSerializer,
+    CameraSpecWriteSerializer,
     CamerasBySiteSerializer,
     DashboardStatsSerializer,
     GroupSerializer,
@@ -427,3 +429,24 @@ class ElevatorRentalView(APIView):
         ser.is_valid(raise_exception=True)
         obj = services.upsert_elevator_rental(site_id, ser.validated_data)
         return Response(ElevatorRentalReadSerializer(obj).data)
+
+
+# ===========================================================================
+# Camera Spec (writes into sigtools_beta.camera_models)
+# ===========================================================================
+
+class CameraSpecUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request) -> Response:
+        from apps.sigtools.models import CameraModel
+
+        ser = CameraSpecWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            result = services.update_camera_spec(
+                **ser.validated_data, changed_by_id=getattr(request.user, "id", None),
+            )
+        except CameraModel.DoesNotExist:
+            return Response({"detail": "camera_model_id not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(CameraSpecSerializer(result).data, status=status.HTTP_200_OK)

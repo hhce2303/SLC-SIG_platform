@@ -313,3 +313,25 @@ class ElevatorRentalWriteSerializer(serializers.Serializer):
     rental_end    = serializers.DateField(allow_null=True, required=False)
     cost          = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True, required=False)
     notes         = serializers.CharField(allow_blank=True, default="")
+
+
+# ===========================================================================
+# Camera Spec (writes into sigtools_beta.camera_models — see apps/sigtools)
+# ===========================================================================
+
+class CameraSpecWriteSerializer(serializers.Serializer):
+    camera_model_id  = serializers.IntegerField()
+    rango_lente_mm   = serializers.ListField(
+        child=serializers.FloatField(min_value=0, max_value=1000), min_length=2, max_length=2,
+    )
+    rango_fov_grados = serializers.ListField(
+        child=serializers.FloatField(min_value=0, max_value=360), min_length=2, max_length=2,
+    )
+
+
+class CameraSpecSerializer(serializers.Serializer):
+    camera_model_id  = serializers.IntegerField()
+    name             = serializers.CharField()
+    brand            = serializers.CharField(allow_null=True)
+    rango_lente_mm   = serializers.ListField(child=serializers.FloatField())
+    rango_fov_grados = serializers.ListField(child=serializers.FloatField())

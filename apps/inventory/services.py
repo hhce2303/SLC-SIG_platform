@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.utils import timezone
 
 from apps.inventory.models import (
-    ActivityLog, Article, Group,
+    ActivityLog, Article, CameraSpecChangeLog, Group,
     MaterialsRequest, DailyReport, CableRun,
     ScopeChange, EquipmentReturn, OperationsAssignment, ElevatorRental,
 )
 from apps.core.realtime import CH_INSTALLATIONS, CH_INVENTORY, publish as _rt_publish
+
+logger = logging.getLogger(__name__)
 
 
 import re as _re
@@ -220,3 +223,55 @@ def upsert_elevator_rental(site_id: int, data: dict) -> ElevatorRental:
     defaults = {k: v for k, v in data.items() if k in allowed}
     obj, _ = ElevatorRental.objects.update_or_create(site_id=site_id, defaults=defaults)
     return obj
+
+
+# ===========================================================================
+# Camera Spec (writes into sigtools_beta.camera_models — first inventory
+# cross-app import into apps.sigtools; see docs/db/camera_models_schema.md)
+# ===========================================================================
+
+def update_camera_spec(
+    *, camera_model_id: int, rango_lente_mm: list, rango_fov_grados: list, changed_by_id: int,
+) -> dict:
+    from apps.core import cache_utils as cu
+    from apps.installations.selectors import CAMERA_CATALOG_CACHE_KEY, CAMERA_MODEL_CATALOG_CACHE_KEY
+    from apps.sigtools.models import CameraBrand, CameraModel
+
+    # Primary effect first — this write must land before anything best-effort below.
+    obj = CameraModel.objects.get(pk=camera_model_id)
+    obj.rango_lente_mm = rango_lente_mm
+    obj.rango_fov_grados = rango_fov_grados
+    obj.save(update_fields=["rango_lente_mm", "rango_fov_grados"])
+
+    cu.invalidate(CAMERA_MODEL_CATALOG_CACHE_KEY, CAMERA_CATALOG_CACHE_KEY)
+
+    # camera_brand_id has no real DB constraint (apps/sigtools/models.py) — a
+    # dangling brand must not turn a successful spec update into a 500.
+    try:
+        brand = CameraBrand.objects.get(pk=obj.camera_brand_id).name
+    except CameraBrand.DoesNotExist:
+        brand = None
+
+    # Audit trail lives in a different database (default) than CameraModel
+    # (sigtools) — no shared transaction is possible across the two, so this
+    # is intentionally best-effort and must never fail the request.
+    try:
+        CameraSpecChangeLog.objects.create(
+            camera_model_id=camera_model_id,
+            rango_lente_mm=rango_lente_mm,
+            rango_fov_grados=rango_fov_grados,
+            changed_by_id=changed_by_id,
+        )
+    except Exception:
+        logger.warning(
+            "update_camera_spec: failed to write CameraSpecChangeLog for camera_model_id=%s",
+            camera_model_id, exc_info=True,
+        )
+
+    return {
+        "camera_model_id": camera_model_id,
+        "name": obj.name,
+        "brand": brand,
+        "rango_lente_mm": rango_lente_mm,
+        "rango_fov_grados": rango_fov_grados,
+    }

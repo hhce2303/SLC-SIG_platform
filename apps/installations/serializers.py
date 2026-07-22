@@ -14,6 +14,8 @@ from rest_framework import serializers
 class CameraModelSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     name = serializers.CharField()
+    rango_lente_mm = serializers.ListField(child=serializers.FloatField(), allow_null=True)
+    rango_fov_grados = serializers.ListField(child=serializers.FloatField(), allow_null=True)
 
 
 class CameraBrandSerializer(serializers.Serializer):
