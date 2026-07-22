@@ -39,7 +39,7 @@ x-mirror-db-env: &mirror-db-env
   SIGTOOLS_DB_NAME: sigtools_beta
   SIGTOOLS_DB_USER: ${MIRROR_DB_USER:-mirror}
   SIGTOOLS_DB_PASSWORD: ${MIRROR_DB_PASSWORD:-mirror}
-  SIGTOOLS_COOKIE_DOMAIN: "localhost"
+  SIGTOOLS_COOKIE_DOMAIN: ""   # host-only cookie — funciona por localhost, 127.0.0.1 o IP LAN
 
 services:
 
