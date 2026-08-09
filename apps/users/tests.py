@@ -17,16 +17,20 @@ from unittest.mock import MagicMock, patch
 from django.conf import settings
 from django.contrib.auth.models import User as AuthUser
 from django.test import RequestFactory, TestCase
+from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.core.exceptions import ServiceException
 from apps.core.models import User as DailyUser
+from apps.platform.models import DailyTokenEpoch
 from apps.users import services
 from apps.users.authentication import (
     DailyAccessToken,
     DailyJWTAuthentication,
     DailyJWTUser,
+    is_token_revoked,
+    token_epoch_cache_key,
 )
 
 
@@ -118,6 +122,88 @@ class DailyJWTAuthenticationTests(TestCase):
 
     def test_authenticate_header_is_bearer(self):
         self.assertEqual(self.auth.authenticate_header(self._request()), "Bearer")
+
+
+class IsTokenRevokedTests(TestCase):
+    """
+    Token-versioning revocation (ADR-0001 point 7). Directly exercises the
+    int/int comparison (Finding J from /autoplan's Eng review: comparing an
+    int `iat` against a tz-aware DateTimeField raises TypeError if not
+    normalized first) and the cache TTL boundary, without needing the full
+    authenticator/request plumbing.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def test_no_epoch_row_means_not_revoked(self):
+        with patch.object(DailyTokenEpoch, "objects") as mock_manager:
+            mock_manager.filter.return_value.first.return_value = None
+            self.assertFalse(is_token_revoked(daily_user_id=25, issued_at=1_700_000_000))
+
+    def test_token_issued_before_revocation_is_revoked(self):
+        revoked_since = timezone.now()
+        epoch = SimpleNamespace(revoked_since=revoked_since)
+        issued_at = int(revoked_since.timestamp()) - 60  # 1 minute before revoke
+
+        with patch.object(DailyTokenEpoch, "objects") as mock_manager:
+            mock_manager.filter.return_value.first.return_value = epoch
+            self.assertTrue(is_token_revoked(daily_user_id=25, issued_at=issued_at))
+
+    def test_token_issued_after_revocation_is_not_revoked(self):
+        revoked_since = timezone.now()
+        epoch = SimpleNamespace(revoked_since=revoked_since)
+        issued_at = int(revoked_since.timestamp()) + 60  # 1 minute after revoke (re-login)
+
+        with patch.object(DailyTokenEpoch, "objects") as mock_manager:
+            mock_manager.filter.return_value.first.return_value = epoch
+            self.assertFalse(is_token_revoked(daily_user_id=25, issued_at=issued_at))
+
+    def test_token_issued_in_same_second_as_revocation_is_revoked(self):
+        """iat <= revoked_since, not <, per ADR-0001 point 7."""
+        revoked_since = timezone.now()
+        epoch = SimpleNamespace(revoked_since=revoked_since)
+        issued_at = int(revoked_since.timestamp())
+
+        with patch.object(DailyTokenEpoch, "objects") as mock_manager:
+            mock_manager.filter.return_value.first.return_value = epoch
+            self.assertTrue(is_token_revoked(daily_user_id=25, issued_at=issued_at))
+
+    def test_result_is_cached(self):
+        """Second call within TTL must not hit the DB again."""
+        with patch.object(DailyTokenEpoch, "objects") as mock_manager:
+            mock_manager.filter.return_value.first.return_value = None
+            is_token_revoked(daily_user_id=25, issued_at=1)
+            is_token_revoked(daily_user_id=25, issued_at=1)
+        mock_manager.filter.assert_called_once()
+
+
+class DailyJWTAuthenticationRevocationTests(TestCase):
+    """
+    End-to-end (through the authenticator, not just is_token_revoked
+    directly): a revoked token must be rejected even though signature and
+    claim shape are both otherwise perfectly valid.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.factory = RequestFactory()
+        self.auth = DailyJWTAuthentication()
+
+    def test_revoked_token_raises_authentication_failed(self):
+        token = DailyAccessToken()
+        token["daily_user_id"] = 25
+        epoch = SimpleNamespace(revoked_since=timezone.now() + timedelta(days=1))
+
+        req = self.factory.get("/")
+        req.META["HTTP_AUTHORIZATION"] = f"Bearer {token}"
+
+        with patch.object(DailyTokenEpoch, "objects") as mock_epoch_mgr:
+            mock_epoch_mgr.filter.return_value.first.return_value = epoch
+            with self.assertRaises(AuthenticationFailed):
+                self.auth.authenticate(req)
 
 
 class AuthenticatorOrderingTests(TestCase):

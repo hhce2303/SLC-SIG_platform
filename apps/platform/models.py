@@ -67,3 +67,34 @@ class UserToolAccess(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id} → {self.tool.name}"
+
+
+class DailyTokenEpoch(models.Model):
+    """
+    Token-versioning revocation for the decoupled daily/platform JWT scheme
+    (ADR-0001 point 7, docs/arc42/daily/decisions/0001-jwt-desacoplado-de-usuarios-django.md).
+
+    daily_user_id is a plain integer referencing daily_users.ID_user, not a
+    real ForeignKey -- deliberately, same pattern as
+    apps.inventory.models.CameraSpecChangeLog.camera_model_id: this table
+    must never gain a hard dependency on apps.core.models.User (or, worse,
+    on auth.User) the way UserToolAccess once did. Placed in apps.platform
+    (which already has real migrations) rather than apps.users (11
+    managed=False models, zero migrations today) specifically to avoid
+    forcing that app's first migration too.
+
+    A single row per operator: revoking is one UPDATE/INSERT
+    (revoked_since = now()), not a per-token denylist entry. See
+    apps.users.authentication.DailyJWTAuthentication for the read side.
+    """
+
+    daily_user_id = models.PositiveIntegerField(primary_key=True, db_index=True)
+    revoked_since = models.DateTimeField()
+
+    class Meta:
+        db_table = "daily_token_epoch"
+        verbose_name = "Revocación de tokens (daily/platform)"
+        verbose_name_plural = "Revocaciones de tokens (daily/platform)"
+
+    def __str__(self) -> str:
+        return f"daily_user={self.daily_user_id} revoked_since={self.revoked_since}"
