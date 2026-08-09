@@ -46,7 +46,7 @@ LOCAL_APPS = [
     "apps.logs",
     "apps.notifications",
     "apps.audit",
-    "apps.reports",
+    "apps.daily",
     "apps.inventory",
     "apps.schedules",
     "apps.platform",

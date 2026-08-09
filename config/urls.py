@@ -27,7 +27,7 @@ api_v1 = [
     path("events/", include("apps.logs.urls")),
     path("", include("apps.notifications.urls")),
     path("audit/", include("apps.audit.urls")),
-    path("reports/", include("apps.reports.urls")),
+    path("daily/", include("apps.daily.urls")),
     path("inventory/", include("apps.inventory.urls")),
     path("schedules/", include("apps.schedules.urls")),
     path("platform/", include("apps.platform.urls")),
