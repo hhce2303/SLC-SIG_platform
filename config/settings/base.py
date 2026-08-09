@@ -83,7 +83,6 @@ MIDDLEWARE = [
 # Authentication Backends
 # ---------------------------------------------------------------------------
 AUTHENTICATION_BACKENDS = [
-    "apps.users.backends.DailyUserBackend",
     "django.contrib.auth.backends.ModelBackend",
 ]
 
@@ -235,6 +234,13 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "apps.sigtools_auth.authentication.SigtoolsCookieAuthentication",
+        # DailyJWTAuthentication MUST precede the generic JWTAuthentication
+        # below: a DailyAccessToken never carries the generic "user_id"
+        # claim, so if JWTAuthentication ran first it would raise
+        # InvalidToken (missing claim) and DRF's authentication chain stops
+        # on a raised exception -- DailyJWTAuthentication would never get a
+        # chance to run. See docs/arc42/daily/decisions/0001-....md.
+        "apps.users.authentication.DailyJWTAuthentication",
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
@@ -270,6 +276,20 @@ SIMPLE_JWT = {
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
+}
+
+# ---------------------------------------------------------------------------
+# Daily JWT (apps.users.authentication.DailyJWTAuthentication)
+# ---------------------------------------------------------------------------
+# Deliberately separate from SIMPLE_JWT above: daily/platform operators must
+# never be forced to close their session mid-shift (ADR-0001), so their
+# access token lifetime is isolated here and does NOT affect any other
+# SIMPLE_JWT consumer on the platform. No refresh token is ever issued for
+# this scheme -- see docs/arc42/daily/decisions/0001-jwt-desacoplado-de-usuarios-django.md.
+DAILY_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        days=env.int("DAILY_JWT_ACCESS_TOKEN_LIFETIME_DAYS", default=3650)  # ~10 years
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -333,16 +353,21 @@ SPECTACULAR_SETTINGS = {
         "---\n\n"
         "## Autenticación\n\n"
         "La API soporta **dos esquemas de autenticación** independientes:\n\n"
-        "### 1 · JWT Bearer — Daily Log / Mobile / SPA\n"
-        "Usado por el Daily Log y las apps de scheduling.\n\n"
+        "### 1 · JWT Bearer — Daily Log / Platform / Mobile / SPA\n"
+        "Usado por el Daily Log (operadores con estación) y por el login central de Platform "
+        "(sin estación). Ambos comparten el mismo esquema decoplado de `django.contrib.auth.User` "
+        "(ver `docs/arc42/daily/decisions/0001-jwt-desacoplado-de-usuarios-django.md`).\n\n"
         "```\n"
         "Authorization: Bearer <access_token>\n"
         "```\n\n"
-        "1. Obtén el par de tokens con `POST /api/v1/auth/login/`.\n"
+        "1. Obtén el `access` token con `POST /api/v1/auth/login/` (Daily) o "
+        "`POST /api/v1/platform/auth/login/` (Platform).\n"
         "2. Incluye el `access_token` en el header `Authorization: Bearer …` de cada petición.\n"
-        "3. Cuando el access token expire (60 min) renuévalo con `POST /api/v1/auth/token/refresh/` "
-        "enviando el `refresh_token` (válido 7 días). Se devuelve un nuevo par y el refresh anterior "
-        "queda invalidado (rotación automática).\n\n"
+        "3. **No hay refresh token** — `refresh` siempre viene `null` en la respuesta de login. "
+        "El `access` token vive ~10 años; no hay que renovarlo ni el cliente debe implementar "
+        "lógica de refresh para este esquema.\n"
+        "4. `POST /api/v1/auth/logout/` cierra la sesión/estación en base de datos, pero **no** "
+        "revoca el token — sigue siendo válido hasta su expiración natural.\n\n"
         "### 2 · Cookie SIGTools — Portal Web / LDAP\n"
         "Usado por el portal web `installations.sig.systems` e `inventory.sig.systems`.\n\n"
         "1. Llama a `POST /api/v1/web-auth/login/` con credenciales de Active Directory.\n"
@@ -397,10 +422,10 @@ SPECTACULAR_SETTINGS = {
             "description": (
                 "Autenticación JWT para el Daily Log y apps móviles/SPA.\n\n"
                 "Flujo típico:\n"
-                "1. `POST /api/v1/auth/login/` → obtén `access` y `refresh` tokens.\n"
+                "1. `POST /api/v1/auth/login/` → obtén `access` (`refresh` siempre `null`).\n"
                 "2. Incluye `Authorization: Bearer <access>` en cada request.\n"
-                "3. `POST /api/v1/auth/token/refresh/` cuando el access expire.\n"
-                "4. `POST /api/v1/auth/logout/` para invalidar la sesión."
+                "3. El `access` token vive ~10 años — no hay renovación que implementar.\n"
+                "4. `POST /api/v1/auth/logout/` cierra la sesión/estación (no revoca el token)."
             ),
         },
         {

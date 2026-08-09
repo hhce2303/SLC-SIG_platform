@@ -61,10 +61,7 @@ class LogoutView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        services.logout(
-            daily_user=daily_user,
-            refresh_token=serializer.validated_data.get("refresh"),
-        )
+        services.logout(daily_user=daily_user)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 

@@ -6,17 +6,24 @@ Ports the following functions from proyecto_app:
   - new_sesion_entry()   → _create_session()
   - do_logout()          → logout()
   - free_station()       → _free_station()
+
+Auth model (post ADR-0001, docs/arc42/daily/decisions/0001-...): tokens are
+issued directly against daily_users via apps.core.models.User -- no
+django.contrib.auth.authenticate()/backend is involved anymore.
+authenticate_daily_credentials()/issue_daily_access_token() are shared with
+apps.platform.services.platform_login(), which needs the exact same
+credential check + token-issuance shape for its station-less login.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from hmac import compare_digest
 from typing import Any
 
-from django.contrib.auth import authenticate
+from django.conf import settings
+from django.contrib.auth.models import User as AuthUser
 from django.db import transaction
 from django.utils import timezone
-from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.core.exceptions import (
     ConflictError,
@@ -24,7 +31,67 @@ from apps.core.exceptions import (
     ServiceException,
 )
 from apps.core.models import StationMap, User as DailyUser
+from apps.users.authentication import DailyAccessToken
 from apps.users.models import Session
+
+
+# ---------------------------------------------------------------------------
+# Shared credential/token helpers (also used by apps.platform.services)
+# ---------------------------------------------------------------------------
+
+def authenticate_daily_credentials(user_id: int, password: str) -> DailyUser:
+    """
+    Validate a (user_id, password) pair directly against daily_users
+    (plain-text comparison -- legacy DB, passwords are NOT hashed;
+    compare_digest instead of `!=` costs nothing and removes a trivial
+    timing side-channel).
+
+    Compatibility shim for apps.schedules (decision logged in ADR-0001 /
+    docs/arc42/daily/11_risks_and_technical_debt.md #3): DailyUserBackend
+    used to be the only code that ever created a django.contrib.auth.User
+    mirror row for an operator. Now that it's deleted, this is the only
+    remaining place that happens -- lazily, on first successful login, not
+    on account creation (this platform has no operator-onboarding flow of
+    its own; operators are loaded directly into daily_users outside
+    Django). apps.schedules' soft FKs to auth.User keep resolving as a
+    result. Remove once apps.schedules migrates onto apps.core.models.User
+    directly.
+
+    Raises:
+        ServiceException -- invalid credentials or user not found
+    """
+    try:
+        daily_user = DailyUser.objects.select_related("role").get(pk=user_id)
+    except DailyUser.DoesNotExist:
+        raise ServiceException("Credenciales inválidas.")
+
+    if not compare_digest(daily_user.password, password):
+        raise ServiceException("Credenciales inválidas.")
+
+    AuthUser.objects.get_or_create(
+        pk=daily_user.pk,
+        defaults={"username": f"daily_{daily_user.pk}", "is_active": True},
+    )
+
+    return daily_user
+
+
+def issue_daily_access_token(daily_user: DailyUser, **extra_claims: Any) -> DailyAccessToken:
+    """Build a DailyAccessToken for `daily_user`. No refresh token, ever."""
+    token = DailyAccessToken()
+    token.set_exp(lifetime=settings.DAILY_JWT["ACCESS_TOKEN_LIFETIME"])
+    token["daily_user_id"] = daily_user.pk
+    token["role"] = daily_user.role.name
+    for claim, value in extra_claims.items():
+        token[claim] = value
+    return token
+
+
+def _user_name(daily_user: DailyUser) -> str:
+    try:
+        return daily_user.profile.user_name
+    except Exception:
+        return f"User #{daily_user.pk}"
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +100,7 @@ from apps.users.models import Session
 
 def login(username: str, password: str, station_id: int) -> dict[str, Any]:
     """
-    Authenticate user by name, claim station, create BD session, return JWT tokens.
+    Authenticate user by name, claim station, create BD session, return JWT.
 
     Raises:
         ServiceException – invalid credentials or user not found
@@ -41,50 +108,29 @@ def login(username: str, password: str, station_id: int) -> dict[str, Any]:
     """
     from apps.core.models import UserName
 
-    # Resolve username -> user_id via daily_users_names
     try:
         profile = UserName.objects.get(user_name__iexact=username)
         user_id = profile.user_id
     except UserName.DoesNotExist:
         raise ServiceException("Credenciales inválidas.")
 
-    auth_user = authenticate(user_id=user_id, password=password)
-    if auth_user is None:
-        raise ServiceException("Credenciales inválidas.")
-
-    daily_user = (
-        DailyUser.objects
-        .select_related("role")
-        .get(pk=auth_user.pk)
-    )
+    daily_user = authenticate_daily_credentials(user_id, password)
 
     with transaction.atomic():
-        # Check user doesn't already have an active session
         if Session.objects.filter(user_id=daily_user.pk, sesion_active=1).exists():
             raise ConflictError("El usuario ya tiene una sesión activa.")
 
-        # Claim station
         _claim_station(daily_user.pk, station_id)
-
-        # Create BD session
         session = _create_session(daily_user.pk, station_id)
 
-    # Issue JWT tokens
-    refresh = RefreshToken.for_user(auth_user)
-    refresh["daily_user_id"] = daily_user.pk
-    refresh["role"] = daily_user.role.name
-
-    try:
-        user_name = daily_user.profile.user_name
-    except Exception:
-        user_name = f"User #{daily_user.pk}"
+    token = issue_daily_access_token(daily_user)
 
     return {
-        "access": str(refresh.access_token),
-        "refresh": str(refresh),
+        "access": str(token),
+        "refresh": None,
         "user": {
             "id": daily_user.pk,
-            "name": user_name,
+            "name": _user_name(daily_user),
             "role": daily_user.role.name,
             "role_id": daily_user.role.pk,
         },
@@ -124,33 +170,29 @@ def _create_session(user_id: int, station_id: int) -> Session:
 # Logout
 # ---------------------------------------------------------------------------
 
-def logout(daily_user: DailyUser, refresh_token: str | None = None) -> None:
+def logout(daily_user: DailyUser) -> None:
     """
-    Close active BD session, free station, and blacklist the refresh token.
+    Close active BD session and free the station.
 
-    Runs in a single transaction to keep BD consistent.
+    Post-ADR-0001: there is no refresh token to blacklist -- the access
+    token remains valid until its natural (~10 year) expiry regardless of
+    logout. This is shift/session bookkeeping only, not a revocation
+    mechanism (see apps.platform.models.DailyTokenEpoch for that).
     """
     with transaction.atomic():
         _close_session(daily_user.pk)
         _free_station(daily_user.pk)
 
-    # Blacklist refresh token (outside transaction — token store may be separate)
-    if refresh_token:
-        _blacklist_token(refresh_token)
-
 
 def _close_session(user_id: int) -> None:
     """Set sesion_out and sesion_active=0 on the current active session."""
-    updated = Session.objects.filter(
+    Session.objects.filter(
         user_id=user_id,
         sesion_active=1,
     ).update(
         sesion_out=timezone.now(),
         sesion_active=0,
     )
-    if updated == 0:
-        # No active session — nothing to close (idempotent)
-        pass
 
 
 def _free_station(user_id: int) -> None:
@@ -160,27 +202,12 @@ def _free_station(user_id: int) -> None:
     )
 
 
-def _blacklist_token(raw_token: str) -> None:
-    """Blacklist a refresh token so it cannot be reused."""
-    try:
-        token = RefreshToken(raw_token)
-        token.blacklist()
-    except Exception:
-        # Token already blacklisted or invalid — safe to ignore on logout
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Profile / Status
 # ---------------------------------------------------------------------------
 
 def get_profile(daily_user: DailyUser) -> dict[str, Any]:
     """Return the user's profile data including active session info."""
-    try:
-        user_name = daily_user.profile.user_name
-    except Exception:
-        user_name = f"User #{daily_user.pk}"
-
     active_session = (
         Session.objects
         .filter(user_id=daily_user.pk, sesion_active=1)
@@ -190,7 +217,7 @@ def get_profile(daily_user: DailyUser) -> dict[str, Any]:
 
     profile: dict[str, Any] = {
         "id": daily_user.pk,
-        "name": user_name,
+        "name": _user_name(daily_user),
         "role": daily_user.role.name,
         "role_id": daily_user.role.pk,
     }

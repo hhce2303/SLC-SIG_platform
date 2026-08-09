@@ -15,11 +15,12 @@ class StationOptionSerializer(serializers.Serializer):
 
 
 class LogoutSerializer(serializers.Serializer):
-    refresh = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        help_text="Refresh token to blacklist",
-    )
+    """
+    No fields — logout takes no body (post ADR-0001, there is no refresh
+    token to blacklist; logout only closes the shift/session in DB). Kept
+    as an (empty) serializer for @extend_schema consistency with the rest
+    of this file, not because any field is expected.
+    """
 
 
 class StatusSerializer(serializers.Serializer):
@@ -54,7 +55,10 @@ class UserProfileSerializer(serializers.Serializer):
 class LoginResponseSerializer(serializers.Serializer):
     """Schema for drf-spectacular documentation."""
     access = serializers.CharField()
-    refresh = serializers.CharField()
+    refresh = serializers.CharField(
+        allow_null=True,
+        help_text="Always null post ADR-0001 — no refresh token is issued.",
+    )
     user = UserProfileSerializer()
     session_id = serializers.IntegerField()
     station_id = serializers.IntegerField()

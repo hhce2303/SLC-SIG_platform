@@ -46,9 +46,8 @@ Authorization: Bearer <access_token>
 ### 2.4 Convenciones generales
 
 - Todos los cuerpos son JSON.
-- El backend usa JWT con `access` y `refresh`.
+- El flujo Daily/Platform (`/auth/`, `/platform/auth/`) usa un `access` token de vida larga (~10 años) y **`refresh` siempre viene `null`** — no hay renovación, el frontend nunca necesita re-loguear al operador por expiración. No implementar lógica de refresh para estos dos flujos.
 - Los endpoints autenticados requieren el `access token` en header `Authorization`.
-- Cuando expire el `access`, el frontend debe llamar a `/auth/token/refresh/` o `/platform/auth/token/refresh/` según el flujo usado.
 - Para exploración manual o validación funcional, usar Swagger en `/api/docs/`.
 
 ---
@@ -73,10 +72,11 @@ Endpoints activos:
 |--------|----------|----------------|-----|
 | POST | `/login/` | No | Login operativo con estación |
 | POST | `/logout/` | Sí | Cerrar sesión y liberar estación |
-| POST | `/token/refresh/` | No | Renovar access token |
 | GET | `/me/` | Sí | Obtener perfil y sesión activa |
 | PATCH | `/me/status/` | Sí | Actualizar estado de sesión |
 | GET | `/stations/available/` | No | Listar estaciones libres |
+
+> No existe `/token/refresh/` para este flujo — el `access` no expira en la práctica (~10 años) y `refresh` siempre viene `null`.
 
 #### Request de login
 
@@ -93,7 +93,7 @@ Endpoints activos:
 ```json
 {
   "access": "jwt-access-token",
-  "refresh": "jwt-refresh-token",
+  "refresh": null,
   "user": {
     "id": 25,
     "name": "operador1",
@@ -110,18 +110,12 @@ Endpoints activos:
 - `station_id` es obligatorio en este flujo.
 - Si el usuario ya tiene una sesión activa, el backend responde con conflicto.
 - Si la estación ya está ocupada, el backend responde con conflicto.
-- `logout` además de cerrar sesión intenta liberar la estación ocupada por el usuario.
+- `logout` además de cerrar sesión intenta liberar la estación ocupada por el usuario. **`logout` no revoca el `access` token** — solo cierra la sesión/estación en base de datos; el token sigue siendo válido hasta su expiración natural.
 - `me` devuelve la sesión activa, incluyendo `station_number` y `sesion_status`.
 
 #### Request de logout
 
-```json
-{
-  "refresh": "jwt-refresh-token"
-}
-```
-
-El campo `refresh` es opcional, pero conviene enviarlo para que el backend lo blacklistée cuando corresponda.
+No requiere body.
 
 #### Request para actualizar status
 
@@ -213,9 +207,8 @@ Secuencia recomendada para Daily Log:
 1. Resolver estación con `station_number` antes del login.
 2. Obtener `station_id` a través de `/platform/station-config/`.
 3. Ejecutar `POST /auth/login/` usando `station_id`.
-4. Guardar `access`, `refresh` y `user`.
-5. Configurar interceptor para refresh automático.
-6. Consultar `GET /auth/me/` al iniciar la app para rehidratar sesión.
+4. Guardar `access` y `user` (`refresh` viene `null` — no hay nada que persistir ahí).
+5. Consultar `GET /auth/me/` al iniciar la app para rehidratar sesión.
 
 ---
 
@@ -465,7 +458,7 @@ Hoy no hay canales websocket activos publicados para consumo frontend en producc
 1. Integrar `auth` daily con resolución previa de estación.
 2. Integrar catálogos y CRUD base de eventos.
 3. Separar módulos auxiliares por dominio: `platform`, `inventory`, `schedules`.
-4. Cerrar manejo de refresh token y rehidratación de sesión.
+4. Cerrar rehidratación de sesión al iniciar la app (no hay manejo de refresh token en `auth`/`platform` — ver §2.4).
 5. Dejar WebSockets para una etapa posterior con Channels y Redis.
 
 ## 8. Checklist de salida por milestone
@@ -473,9 +466,9 @@ Hoy no hay canales websocket activos publicados para consumo frontend en producc
 ### Milestone 1
 
 - Login exitoso con `station_id` válido.
-- Persistencia de `access` y `refresh`.
+- Persistencia de `access` (`refresh` siempre `null`, no se persiste).
 - `GET /auth/me/` operativo al recargar.
-- Logout cerrando sesión correctamente.
+- Logout cerrando sesión correctamente (no revoca el token, solo la sesión/estación).
 
 ### Milestone 2
 

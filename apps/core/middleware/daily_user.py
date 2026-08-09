@@ -104,6 +104,12 @@ class DailyUserMiddleware:
             from rest_framework_simplejwt.tokens import AccessToken
 
             token = AccessToken(auth_header[7:])  # strip "Bearer "
-            return token["user_id"]
+            # Post ADR-0001: daily/platform tokens carry "daily_user_id", never
+            # "user_id" (that claim belonged to the old auth.User-backed scheme).
+            # Getting this claim name wrong is a *silent* bug: the broad except
+            # below swallows the resulting KeyError and request.daily_user just
+            # becomes None for every request, which is exactly what happened
+            # here before this fix. See docs/arc42/daily/decisions/0001-....md.
+            return token["daily_user_id"]
         except Exception:
             return None

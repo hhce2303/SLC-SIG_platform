@@ -89,11 +89,14 @@ Container name: `daily-log-backend`. Service name: `web`. Port: `8000`.
 
 ## Authentication
 
-- `JWTAuthentication` (SimpleJWT) — standard API clients
 - `SigtoolsCookieAuthentication` — SigTools cookie session (checked first)
+- `DailyJWTAuthentication` — daily/platform operators, decoupled from `django.contrib.auth.User` (see `docs/arc42/daily/decisions/0001-jwt-desacoplado-de-usuarios-django.md`). **Must precede** `JWTAuthentication` below in `DEFAULT_AUTHENTICATION_CLASSES` — a `DailyAccessToken` never carries the generic `user_id` claim, so `JWTAuthentication` would reject it before this authenticator gets a chance to run.
+- `JWTAuthentication` (SimpleJWT) — other API clients
 - `SessionAuthentication` — Django admin session (chatbot widget)
 
 All endpoints require `IsAuthenticated` unless explicitly overridden.
+
+Daily/platform tokens live ~10 years with no refresh token (`"refresh": null` in the login response, by design — see the ADR above). Logout closes shift/session bookkeeping only; it does not revoke the access token. Revocation is via `daily_token_epoch` (token versioning), not blacklisting.
 
 ---
 
