@@ -5,9 +5,9 @@
 | Item | Value |
 |---|---|
 | **Server** | MKS Server |
-| **Server IP** | `192.168.1.69` |
-| **API Base URL** | `http://192.168.1.69/api/v1/` |
-| **Admin** | `http://192.168.1.69/admin/` |
+| **Server IP** | `api.sig.systems` |
+| **API Base URL** | `http://api.sig.systems/api/v1/` |
+| **Admin** | `http://api.sig.systems/admin/` |
 | **Stack path** | `C:\Users\jjacome\Documents\GitHub\SLC-SIG_platform` |
 | **Stack file** | `docker/docker-compose.yml` |
 | **Web container** | `SIGplatform-web` |
@@ -86,11 +86,26 @@ docker cp apps\<app>\<file>.py SIGplatform-web:/app/apps/<app>/<file>.py
 docker compose -f docker\docker-compose.yml restart web
 ```
 
-### Full rebuild (Dockerfile or requirements changed)
+### Full rebuild (Dockerfile, requirements, or app code changed)
+
+The MKS stack is a separate checkout — it does **not** auto-sync with `main` (there is
+no CI target enabled for `mks` yet). Pull the latest code before rebuilding, or the
+build will silently re-package the same old code:
 
 ```bash
-docker compose -f docker/docker-compose.yml up --build -d
+# 1. Sync code — this checkout is independent of your dev working tree
+git fetch origin main
+git reset --hard origin/main
+
+# 2. Rebuild only the app services (does not touch nginx/redis)
+docker compose -f docker/docker-compose.yml build web poller
+
+# 3. Recreate only those containers
+docker compose -f docker/docker-compose.yml up -d --no-deps web poller
 ```
+
+> `git reset --hard` discards tracked local changes in this checkout. `.env` and other
+> gitignored files are untouched.
 
 ### View logs
 
