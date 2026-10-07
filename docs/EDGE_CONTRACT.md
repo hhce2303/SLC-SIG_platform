@@ -58,6 +58,10 @@ Solo funciona con ambos stacks **en el mismo host Docker**.
 - `SIGTOOLS_COOKIE_DOMAIN` (`.sig.systems`) depende del dominio público del borde.
 - SIG-Desk autentica contra SIGTools en `api.sig.systems:8091`: cambiar ese host o puerto lo rompe.
 
+## Validación
+
+`.github/workflows/nginx-validate.yml` corre `nginx -t` (default.conf, ssl.conf y default.conf + vhost de SIG-Desk) en cada PR que toque la config del borde. No despliega.
+
 ## Preguntas abiertas (bloquean la Fase 2)
 
 1. ¿SIG-Desk corre ya en producción (MKS, 192.168.1.69)? El deploy de producción usa solo `docker-compose.yml`; el overlay `sigdesk` no está en CI.

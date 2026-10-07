@@ -1,0 +1,55 @@
+name: Validate nginx
+
+# Valida la config del borde con `nginx -t` antes de mergear. No despliega nada.
+# Cubre: default.conf, ssl.conf (con cert autofirmado temporal) y la combinación
+# default.conf + vhost de SIG-Desk (inline en docker-compose.sigdesk.yml).
+
+on:
+  pull_request:
+    paths:
+      - "docker/nginx.conf/**"
+      - "docker/docker-compose*.yml"
+      - ".github/workflows/nginx-validate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docker/nginx.conf/**"
+      - "docker/docker-compose*.yml"
+  workflow_dispatch: {}
+
+jobs:
+  nginx-t:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare inputs
+        run: |
+          mkdir -p /tmp/nginx-ci/certs /tmp/nginx-ci/conf
+          openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=localhost" \
+            -keyout /tmp/nginx-ci/certs/localhost.key -out /tmp/nginx-ci/certs/localhost.crt
+          cp .env.example .env
+          # Extrae el vhost inline de SIG-Desk (compose ya des-escapa $$ -> $).
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.sigdesk.yml config --format json \
+            | jq -r '.configs.sigdesk_vhost.content' > /tmp/nginx-ci/conf/sigdesk.conf
+          test -s /tmp/nginx-ci/conf/sigdesk.conf
+
+      - name: nginx -t default.conf
+        run: |
+          docker run --rm --add-host web:127.0.0.1 \
+            -v "$PWD/docker/nginx.conf/default.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:alpine nginx -t
+
+      - name: nginx -t ssl.conf
+        run: |
+          docker run --rm --add-host web:127.0.0.1 \
+            -v "$PWD/docker/nginx.conf/ssl.conf:/etc/nginx/conf.d/default.conf:ro" \
+            -v /tmp/nginx-ci/certs:/etc/nginx/certs:ro \
+            nginx:alpine nginx -t
+
+      - name: nginx -t default.conf + vhost SIG-Desk
+        run: |
+          docker run --rm --add-host web:127.0.0.1 \
+            -v "$PWD/docker/nginx.conf/default.conf:/etc/nginx/conf.d/default.conf:ro" \
+            -v /tmp/nginx-ci/conf/sigdesk.conf:/etc/nginx/conf.d/sigdesk.conf:ro \
+            nginx:alpine nginx -t
