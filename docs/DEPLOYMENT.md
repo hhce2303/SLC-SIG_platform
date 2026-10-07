@@ -186,6 +186,8 @@ On the new server, ensure the Docker socket is at `/var/run/docker.sock` (standa
 
 ## nginx Configuration
 
+> El contrato del borde compartido (nginx ↔ SIG-Desk/Kong, red `sig-edge`, responsables y preguntas abiertas) está en [EDGE_CONTRACT.md](EDGE_CONTRACT.md).
+
 Config file: `docker/nginx.conf/default.conf`
 
 - All traffic on port 80 is proxied to `web:8000`
