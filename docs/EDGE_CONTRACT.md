@@ -4,6 +4,12 @@ Documento de la **Fase 0** de la extracción del borde a un repo de infraestruct
 (informe: `SIG-SLC/reports/Extraer nginx a servicios compartidos.md`). Describe lo que existe hoy; no
 cambia comportamiento. Cuando el borde se mueva a su propio repo, este contrato viaja con él.
 
+> **Actualización 2026-10-10 — corte realizado.** El borde de producción ya lo opera `sig-infra`
+> (`sig-edge-nginx`, 8091, red `sig-edge`). Este repo solo aporta `docker/docker-compose.edge.yml`
+> (`web` con alias `slc-web`) y el deploy `mks` corre con `external_edge: true` (no crea el nginx de
+> aquí). El nginx de este repo queda para el espejo local y como rollback; la topología de abajo es
+> la **anterior** al corte. Contrato vigente: `sig-infra/README.md`.
+
 ## Topología actual
 
 ```

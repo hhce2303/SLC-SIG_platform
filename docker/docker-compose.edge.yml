@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────
+#  SIG Platform — overlay: Django detrás del borde compartido (sig-infra)
+#
+#  El nginx público ya no es de este repo: lo opera sig-infra (contenedor
+#  sig-edge-nginx, puerto 8091). Este overlay solo une `web` a la red
+#  compartida `sig-edge` con el alias estable `slc-web`, que es el upstream
+#  del vhost api.sig.systems en sig-infra/edge/nginx/conf.d/.
+#
+#  Requisitos:
+#    1. Red compartida (la crea sig-infra con `make network`):
+#       docker network create sig-edge
+#    2. El servicio `nginx` de este repo debe estar parado (usa el mismo 8091).
+#
+#  Uso (sin el servicio nginx de este repo):
+#    docker compose -f docker/docker-compose.yml \
+#                   -f docker/docker-compose.edge.yml up -d web redis poller
+#
+#  Contrato y corte: sig-infra/docs/runbook.md
+# ─────────────────────────────────────────────────────────────
+
+services:
+  web:
+    networks:
+      default:
+      sig-edge:
+        aliases:
+          - slc-web
+
+networks:
+  sig-edge:
+    external: true
+    name: sig-edge

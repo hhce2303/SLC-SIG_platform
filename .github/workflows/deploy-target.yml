@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      external_edge:
+        description: "El nginx público lo opera sig-infra (sig-edge-nginx). No se crea el nginx de este stack y se omiten sus pasos de validación/restart."
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: deploy-${{ inputs.runner_label }}
@@ -91,16 +96,23 @@ jobs:
         # sigue sirviendo con la config anterior. (No usamos `nginx -s reload`: el sync
         # hace `git checkout -f`, que reemplaza los archivos y deja obsoletos los bind
         # mounts de archivo único en el contenedor en ejecución.)
-        if: env.NGINX_CHANGED == 'True'
+        if: env.NGINX_CHANGED == 'True' && !inputs.external_edge
         run: |
           docker compose ${{ inputs.compose_files }} run --rm --no-deps --entrypoint nginx nginx -t
           if ($LASTEXITCODE -ne 0) { throw 'nginx -t failed: deploy aborted, running nginx untouched' }
 
       - name: Deploy (recreate containers)
-        run: docker compose ${{ inputs.compose_files }} up -d
+        # Con borde externo (sig-infra) el nginx de este stack NO se crea: usaría el mismo 8091.
+        run: |
+          if ('${{ inputs.external_edge }}' -eq 'true') {
+            docker compose ${{ inputs.compose_files }} up -d redis web poller
+          } else {
+            docker compose ${{ inputs.compose_files }} up -d
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'compose up failed' }
 
       - name: Restart nginx (only if its config changed)
-        if: env.NGINX_CHANGED == 'True'
+        if: env.NGINX_CHANGED == 'True' && !inputs.external_edge
         run: docker compose ${{ inputs.compose_files }} restart nginx
 
       - name: Health check (web container)

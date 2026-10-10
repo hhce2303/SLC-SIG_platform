@@ -188,6 +188,8 @@ On the new server, ensure the Docker socket is at `/var/run/docker.sock` (standa
 
 > El contrato del borde compartido (nginx ↔ SIG-Desk/Kong, red `sig-edge`, responsables y preguntas abiertas) está en [EDGE_CONTRACT.md](EDGE_CONTRACT.md).
 
+> **Producción (MKS) ya no usa este nginx.** Desde 2026-10-10 el borde público lo opera el repo `sig-infra` (contenedor `sig-edge-nginx`, puerto 8091). Aquí `web` solo se une a la red `sig-edge` con el alias `slc-web` mediante `docker/docker-compose.edge.yml`, y el deploy del target `mks` (`external_edge: true`) no crea el servicio `nginx`. Los vhosts vigentes están en `sig-infra/edge/nginx/conf.d/`; lo que sigue describe el nginx de este repo, que se conserva para el espejo local y como rollback.
+
 Config file: `docker/nginx.conf/default.conf`
 
 - All traffic on port 80 is proxied to `web:8000`
