@@ -2,33 +2,29 @@
 #  SIG Platform — overlay: SIGDesk comparte la entrada/salida web
 #
 #  El nginx de la plataforma (SIGplatform-nginx, puerto ${NGINX_PORT:-8091})
-#  pasa a ser la única puerta de entrada también para SIGDesk. Lo hace con
-#  un segundo virtual host (server_name desk.sig.systems) que convive con el
-#  default.conf de la plataforma SIN modificarlo:
+#  pasa a ser también la entrada/salida web de la API de SIGDesk. Lo hace
+#  con un segundo virtual host (server_name desk.sig.systems) que convive
+#  con el default.conf de la plataforma SIN modificarlo:
 #
-#    desk.sig.systems:8091/             → SPA de SIGDesk   (sigdesk-frontend)
-#    desk.sig.systems:8091/desk-api/*   → Kong de SIGDesk  (sigdesk-kong, sin el prefijo)
-#    desk.sig.systems:8091/api/*        → Django (SIGTools) — mismo origen
-#    desk.sig.systems:8091/web-auth/*   → Django (SIGTools) — mismo origen
-#    desk.sig.systems:8091/media/*      → media_data
+#    desk.sig.systems:8091/desk-api/*  → Kong de SIGDesk (sigdesk-kong, sin el prefijo)
 #
-#  Mismo origen para SPA + API de Desk + SIGTools: no hace falta CORS y la
-#  cookie sig_token (.sig.systems) viaja sin cambios. api.sig.systems sigue
-#  atendido por default.conf igual que antes.
+#  El frontend de SIGDesk se despliega aparte; como su origen es distinto,
+#  ese origen debe estar en el plugin cors de SIG-Desk-Backend/kong.yml.
+#  api.sig.systems sigue atendido por default.conf igual que antes.
 #
 #  Requisitos:
 #    1. DNS / hosts:  desk.sig.systems → la IP del servidor.
 #    2. Red compartida, una sola vez:  docker network create sig-edge
-#    3. Los contenedores de SIGDesk se unen a esa red con
+#    3. Kong de SIGDesk se une a esa red con
 #       SIG-Desk/SIG-Desk-Backend/compose.edge.yaml.
 #
 #  Uso:
 #    docker compose -f docker/docker-compose.yml \
 #                   -f docker/docker-compose.sigdesk.yml up -d
 #
-#  Si SIGDesk está caído, el nginx de la plataforma sigue arrancando: los
-#  upstreams de Desk se resuelven en cada petición (resolver de Docker +
-#  variables), no al iniciar. Desk caído solo devuelve 502 en desk.sig.systems.
+#  Si Kong está caído, el nginx de la plataforma sigue arrancando: el
+#  upstream se resuelve en cada petición (resolver de Docker + variable),
+#  no al iniciar. Kong caído solo devuelve 502 en desk.sig.systems.
 # ─────────────────────────────────────────────────────────────
 
 services:
@@ -53,17 +49,6 @@ configs:
 
           client_max_body_size 50M;
 
-          # SPA de SIGDesk
-          location / {
-              set $$desk_frontend http://sigdesk-frontend:80;
-              proxy_pass         $$desk_frontend;
-              proxy_http_version 1.1;
-              proxy_set_header   Host              $$host;
-              proxy_set_header   X-Real-IP         $$remote_addr;
-              proxy_set_header   X-Forwarded-For   $$proxy_add_x_forwarded_for;
-              proxy_set_header   X-Forwarded-Proto $$scheme;
-          }
-
           # API de SIGDesk (Kong). Kong expone rutas sin prefijo (/tickets, /me, ...)
           # → se retira /desk-api/ antes de reenviar.
           location /desk-api/ {
@@ -81,34 +66,8 @@ configs:
               proxy_read_timeout 86400;
           }
 
-          # SIGTools (auth AD compartida) — mismo origen que la SPA
-          location /api/ {
-              proxy_pass         http://django;
-              proxy_http_version 1.1;
-              proxy_set_header   Host              $$host;
-              proxy_set_header   X-Real-IP         $$remote_addr;
-              proxy_set_header   X-Forwarded-For   $$proxy_add_x_forwarded_for;
-              proxy_set_header   X-Forwarded-Proto $$scheme;
-              proxy_set_header   Connection        "";
-              proxy_buffering    off;
-              proxy_cache        off;
-              proxy_read_timeout 86400;
-          }
-
-          location /web-auth/ {
-              proxy_pass         http://django;
-              proxy_http_version 1.1;
-              proxy_set_header   Host              $$host;
-              proxy_set_header   X-Real-IP         $$remote_addr;
-              proxy_set_header   X-Forwarded-For   $$proxy_add_x_forwarded_for;
-              proxy_set_header   X-Forwarded-Proto $$scheme;
-          }
-
-          location /media/ {
-              alias /app/media/;
-              access_log off;
-              expires 7d;
-              add_header Cache-Control "public";
+          location / {
+              return 404;
           }
       }
 
