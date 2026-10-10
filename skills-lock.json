@@ -10,11 +10,6 @@
       "source": "supabase/agent-skills",
       "sourceType": "github",
       "computedHash": "abf015aafed757edaf2a329299fc106abebdc53bc7f089e92e1f762ed3d8f117"
-    },
-    "docker-django-ops": {
-      "source": ".claude/skills/docker-django-ops",
-      "sourceType": "local",
-      "computedHash": "docker-django-ops-local-v1"
     }
   }
 }
