@@ -62,9 +62,13 @@ Solo funciona con ambos stacks **en el mismo host Docker**.
 
 `.github/workflows/nginx-validate.yml` corre `nginx -t` (default.conf, ssl.conf y default.conf + vhost de SIG-Desk) en cada PR que toque la config del borde. No despliega.
 
-## Preguntas abiertas (bloquean la Fase 2)
+## Decisiones confirmadas (2026-10-09)
 
-1. ¿SIG-Desk corre ya en producción (MKS, 192.168.1.69)? El deploy de producción usa solo `docker-compose.yml`; el overlay `sigdesk` no está en CI.
-2. ¿Dónde termina TLS en producción y quién renueva los certificados? `DEPLOYMENT.md` lo lista como pendiente; `LOCAL_MIRROR.md` dice que producción usa CA real.
-3. ¿Quién aprueba cambios de rutas en el borde?
-4. ¿Puerto real por entorno: 8091 (default de compose) u 80 (como dicen algunos docs)?
+1. **SIG-Desk correrá en producción** (MKS). El overlay `sigdesk` aún no está en CI/deploy de producción: pendiente de la Fase 1/2.
+2. **Certificados: gestión manual** (sin renovación automática por ahora). Automatizar queda para la Fase 3.
+3. **Dueño del borde y aprobador de cambios de ruta: Héctor Cruz.**
+
+## Preguntas abiertas
+
+1. ¿En qué componente termina TLS en producción (nginx del borde, según el plan)? Falta confirmarlo al activar HTTPS.
+2. ¿Puerto real por entorno: 8091 (default de compose) u 80 (como dicen algunos docs)?
