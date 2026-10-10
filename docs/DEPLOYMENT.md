@@ -161,7 +161,7 @@ identity. No GitHub Secrets are required — only repository **Variables**.
 | Build | `docker compose build` (does not disrupt running containers) |
 | Test gate | runs `python -m pytest` (SQLite) in an ephemeral container; **aborts the deploy if tests fail** |
 | Deploy | `docker compose up -d` (migrations run via `entrypoint.sh`) |
-| nginx | `restart nginx` **only** when `docker/nginx.conf/**` changed (bind-mounted config) |
+| nginx | only when `docker/nginx.conf/**` changed: `nginx -t` on the new config in a throwaway container first (aborts the deploy if invalid), then `restart nginx` |
 | Health | retries `GET /api/v1/health/` on the `web` container, then prints `ps` |
 
 Trigger manually anytime via **Actions → Deploy → Run workflow** (`workflow_dispatch`).

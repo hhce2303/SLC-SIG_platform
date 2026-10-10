@@ -25,6 +25,7 @@
 #  Si Kong está caído, el nginx de la plataforma sigue arrancando: el
 #  upstream se resuelve en cada petición (resolver de Docker + variable),
 #  no al iniciar. Kong caído solo devuelve 502 en desk.sig.systems.
+#  El vhost vive en docker/nginx.conf/conf.d/desk.conf (ya no inline).
 # ─────────────────────────────────────────────────────────────
 
 services:
@@ -32,44 +33,10 @@ services:
     networks:
       - default      # imprescindible: de ahí se alcanza `web` (Django)
       - sig-edge
-    configs:
-      - source: sigdesk_vhost
-        target: /etc/nginx/conf.d/sigdesk.conf
-
-configs:
-  sigdesk_vhost:
-    content: |
-      # Resolver embebido de Docker; evita que nginx falle al arrancar
-      # si sigdesk-* no existe todavía.
-      resolver 127.0.0.11 valid=10s ipv6=off;
-
-      server {
-          listen 80;
-          server_name desk.sig.systems;
-
-          client_max_body_size 50M;
-
-          # API de SIGDesk (Kong). Kong expone rutas sin prefijo (/tickets, /me, ...)
-          # → se retira /desk-api/ antes de reenviar.
-          location /desk-api/ {
-              set $$desk_kong http://sigdesk-kong:8000;
-              rewrite            ^/desk-api/(.*)$$ /$$1 break;
-              proxy_pass         $$desk_kong;
-              proxy_http_version 1.1;
-              proxy_set_header   Host              $$host;
-              proxy_set_header   X-Real-IP         $$remote_addr;
-              proxy_set_header   X-Forwarded-For   $$proxy_add_x_forwarded_for;
-              proxy_set_header   X-Forwarded-Proto $$scheme;
-              proxy_set_header   Connection        "";
-              proxy_buffering    off;
-              proxy_cache        off;
-              proxy_read_timeout 86400;
-          }
-
-          location / {
-              return 404;
-          }
-      }
+    volumes:
+      # Vhost versionado en docker/nginx.conf/conf.d/desk.conf (cubierto por el
+      # gate de CI de docker/nginx.conf/**).
+      - ./nginx.conf/conf.d/desk.conf:/etc/nginx/conf.d/desk.conf:ro
 
 networks:
   # Creada a mano una vez (`docker network create sig-edge`); la comparten
