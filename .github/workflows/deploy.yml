@@ -41,4 +41,6 @@ jobs:
     with:
       runner_label: mks
       stack_dir: ${{ vars.STACK_DIR_MKS }}
-      compose_files: -f docker/docker-compose.yml
+      # nginx público = sig-infra (sig-edge-nginx); este stack solo expone `web` como slc-web en sig-edge.
+      compose_files: -f docker/docker-compose.yml -f docker/docker-compose.edge.yml
+      external_edge: true

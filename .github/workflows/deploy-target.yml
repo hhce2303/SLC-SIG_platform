@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      external_edge:
+        description: "El nginx público lo opera sig-infra (sig-edge-nginx). No se crea el nginx de este stack y se omiten sus pasos de validación/restart."
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: deploy-${{ inputs.runner_label }}
@@ -85,11 +90,29 @@ jobs:
         # user's /app/.local/bin which is not on PATH. Fails the job before deploy.
         run: docker compose ${{ inputs.compose_files }} run --rm --no-deps --entrypoint sh -e DJANGO_SETTINGS_MODULE=config.settings.test -e READ_DOT_ENV=False web -c "pip install --no-cache-dir --quiet pytest pytest-django factory-boy && python -m pytest -p no:cacheprovider"
 
+      - name: Validate nginx config (only if it changed)
+        # `nginx -t` en un contenedor desechable con los mounts de la config NUEVA, antes
+        # de `up -d`/`restart`: una config inválida aborta el deploy y el nginx en marcha
+        # sigue sirviendo con la config anterior. (No usamos `nginx -s reload`: el sync
+        # hace `git checkout -f`, que reemplaza los archivos y deja obsoletos los bind
+        # mounts de archivo único en el contenedor en ejecución.)
+        if: env.NGINX_CHANGED == 'True' && !inputs.external_edge
+        run: |
+          docker compose ${{ inputs.compose_files }} run --rm --no-deps --entrypoint nginx nginx -t
+          if ($LASTEXITCODE -ne 0) { throw 'nginx -t failed: deploy aborted, running nginx untouched' }
+
       - name: Deploy (recreate containers)
-        run: docker compose ${{ inputs.compose_files }} up -d
+        # Con borde externo (sig-infra) el nginx de este stack NO se crea: usaría el mismo 8091.
+        run: |
+          if ('${{ inputs.external_edge }}' -eq 'true') {
+            docker compose ${{ inputs.compose_files }} up -d redis web poller
+          } else {
+            docker compose ${{ inputs.compose_files }} up -d
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'compose up failed' }
 
       - name: Restart nginx (only if its config changed)
-        if: env.NGINX_CHANGED == 'True'
+        if: env.NGINX_CHANGED == 'True' && !inputs.external_edge
         run: docker compose ${{ inputs.compose_files }} restart nginx
 
       - name: Health check (web container)

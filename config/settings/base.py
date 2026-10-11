@@ -19,6 +19,13 @@ SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
 
+# Detrás del nginx de borde (ver docs/EDGE_CONTRACT.md). Apagado por defecto:
+# solo activar cuando el borde reenvíe X-Forwarded-Proto/Host de forma fiable,
+# para que request.is_secure() y build_absolute_uri() vean el esquema/host público.
+if env.bool("TRUST_PROXY_HEADERS", default=False):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
+
 # ---------------------------------------------------------------------------
 # Application definition
 # ---------------------------------------------------------------------------

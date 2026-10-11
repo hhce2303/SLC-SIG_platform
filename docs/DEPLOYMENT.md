@@ -161,7 +161,7 @@ identity. No GitHub Secrets are required — only repository **Variables**.
 | Build | `docker compose build` (does not disrupt running containers) |
 | Test gate | runs `python -m pytest` (SQLite) in an ephemeral container; **aborts the deploy if tests fail** |
 | Deploy | `docker compose up -d` (migrations run via `entrypoint.sh`) |
-| nginx | `restart nginx` **only** when `docker/nginx.conf/**` changed (bind-mounted config) |
+| nginx | only when `docker/nginx.conf/**` changed: `nginx -t` on the new config in a throwaway container first (aborts the deploy if invalid), then `restart nginx` |
 | Health | retries `GET /api/v1/health/` on the `web` container, then prints `ps` |
 
 Trigger manually anytime via **Actions → Deploy → Run workflow** (`workflow_dispatch`).
@@ -185,6 +185,10 @@ On the new server, ensure the Docker socket is at `/var/run/docker.sock` (standa
 ---
 
 ## nginx Configuration
+
+> El contrato del borde compartido (nginx ↔ SIG-Desk/Kong, red `sig-edge`, responsables y preguntas abiertas) está en [EDGE_CONTRACT.md](EDGE_CONTRACT.md).
+
+> **Producción (MKS) ya no usa este nginx.** Desde 2026-10-10 el borde público lo opera el repo `sig-infra` (contenedor `sig-edge-nginx`, puerto 8091). Aquí `web` solo se une a la red `sig-edge` con el alias `slc-web` mediante `docker/docker-compose.edge.yml`, y el deploy del target `mks` (`external_edge: true`) no crea el servicio `nginx`. Los vhosts vigentes están en `sig-infra/edge/nginx/conf.d/`; lo que sigue describe el nginx de este repo, que se conserva para el espejo local y como rollback.
 
 Config file: `docker/nginx.conf/default.conf`
 
